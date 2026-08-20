@@ -131,17 +131,43 @@ function extractProblems(cell: string): Omit<Problem, "solved">[] {
 // ── Public API ────────────────────────────────────────────────────────────────
 export async function fetchAssignments(): Promise<DayGroup[]> {
   const csvUrl = process.env.SHEET_CSV_URL;
+  // --- TEMPORARY DEBUG LOGS (START) ---
+  console.log("[DEBUG] SHEET_CSV_URL env var:", csvUrl ? csvUrl.slice(0, 60) + "..." : "NOT SET");
+  // --- TEMPORARY DEBUG LOGS (END) ---
+
   if (!csvUrl) throw new Error("SHEET_CSV_URL environment variable is not set.");
 
   const res = await fetch(csvUrl, {
     headers: { "User-Agent": "Mozilla/5.0" },
     cache: "no-store", // always fetch fresh — never serve stale data
   });
+
+  // --- TEMPORARY DEBUG LOGS (START) ---
+  // 1. Log the HTTP status code of the fetch response
+  console.log("[DEBUG] 1. Sheet fetch HTTP status:", res.status, res.statusText);
+  // --- TEMPORARY DEBUG LOGS (END) ---
+
   if (!res.ok) {
     throw new Error(`Sheet fetch failed: HTTP ${res.status}. Make sure the sheet is shared publicly.`);
   }
 
-  const rows = parseCSV(await res.text());
+  const rawText = await res.text();
+
+  // --- TEMPORARY DEBUG LOGS (START) ---
+  // 2. Log the first 200 characters of the raw response body
+  console.log("[DEBUG] 2. Raw response preview (first 200 chars):", JSON.stringify(rawText.slice(0, 200)));
+  // --- TEMPORARY DEBUG LOGS (END) ---
+
+  const rows = parseCSV(rawText);
+
+  // --- TEMPORARY DEBUG LOGS (START) ---
+  // 3. Log the number of rows successfully parsed after parsing
+  console.log("[DEBUG] 3. Number of parsed CSV rows:", rows.length);
+  if (rows.length > 0) {
+    console.log("[DEBUG] Parsed CSV headers:", Object.keys(rows[0]));
+  }
+  // --- TEMPORARY DEBUG LOGS (END) ---
+
   if (rows.length === 0) return [];
 
   const headers     = Object.keys(rows[0]);
