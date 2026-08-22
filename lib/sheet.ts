@@ -130,21 +130,38 @@ function extractProblems(cell: string): Omit<Problem, "solved">[] {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 export async function fetchAssignments(): Promise<DayGroup[]> {
-  const csvUrl = process.env.SHEET_CSV_URL;
+  const csvUrlRaw = process.env.SHEET_CSV_URL;
+  // Trim any accidental whitespace or invisible chars that may appear in Vercel env vars
+  const csvUrl = csvUrlRaw?.trim();
+
   // --- TEMPORARY DEBUG LOGS (START) ---
-  console.log("[DEBUG] SHEET_CSV_URL env var:", csvUrl ? csvUrl.slice(0, 60) + "..." : "NOT SET");
+  console.log("[DEBUG] SHEET_CSV_URL raw length:", csvUrlRaw?.length ?? 0);
+  console.log("[DEBUG] SHEET_CSV_URL trimmed:", csvUrl ? csvUrl.slice(0, 80) + "..." : "NOT SET");
   // --- TEMPORARY DEBUG LOGS (END) ---
 
   if (!csvUrl) throw new Error("SHEET_CSV_URL environment variable is not set.");
 
-  const res = await fetch(csvUrl, {
-    headers: { "User-Agent": "Mozilla/5.0" },
-    cache: "no-store", // always fetch fresh — never serve stale data
-  });
+  let res: Response;
+  try {
+    res = await fetch(csvUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (compatible; lc-tracker/1.0)",
+        "Accept": "text/csv, text/plain, */*",
+      },
+      redirect: "follow",  // explicitly follow Google's 307 redirect
+      cache: "no-store",
+    });
+  } catch (fetchErr: unknown) {
+    const e = fetchErr as Error;
+    console.error("[DEBUG] fetch() threw:", e.message);
+    throw new Error(`Sheet network error: ${e.message}`);
+  }
 
   // --- TEMPORARY DEBUG LOGS (START) ---
-  // 1. Log the HTTP status code of the fetch response
+  // 1. HTTP status + whether a redirect happened
   console.log("[DEBUG] 1. Sheet fetch HTTP status:", res.status, res.statusText);
+  console.log("[DEBUG]    Redirected:", res.redirected);
+  console.log("[DEBUG]    Final URL (first 80):", res.url?.slice(0, 80));
   // --- TEMPORARY DEBUG LOGS (END) ---
 
   if (!res.ok) {
@@ -154,17 +171,25 @@ export async function fetchAssignments(): Promise<DayGroup[]> {
   const rawText = await res.text();
 
   // --- TEMPORARY DEBUG LOGS (START) ---
-  // 2. Log the first 200 characters of the raw response body
-  console.log("[DEBUG] 2. Raw response preview (first 200 chars):", JSON.stringify(rawText.slice(0, 200)));
+  // 2. First 300 chars of raw body — reveals if it's CSV or an HTML page
+  const preview = rawText.slice(0, 300);
+  const looksLikeHtml = preview.trimStart().startsWith("<");
+  console.log("[DEBUG] 2. Body length:", rawText.length);
+  console.log("[DEBUG]    Looks like HTML:", looksLikeHtml);
+  console.log("[DEBUG]    Raw preview (first 300):", JSON.stringify(preview));
   // --- TEMPORARY DEBUG LOGS (END) ---
+
+  if (looksLikeHtml) {
+    throw new Error("Sheet fetch returned an HTML page instead of CSV. Check sheet sharing permissions (must be 'Anyone with the link can view').");
+  }
 
   const rows = parseCSV(rawText);
 
   // --- TEMPORARY DEBUG LOGS (START) ---
-  // 3. Log the number of rows successfully parsed after parsing
+  // 3. Number of rows successfully parsed + headers detected
   console.log("[DEBUG] 3. Number of parsed CSV rows:", rows.length);
   if (rows.length > 0) {
-    console.log("[DEBUG] Parsed CSV headers:", Object.keys(rows[0]));
+    console.log("[DEBUG]    Parsed CSV headers:", JSON.stringify(Object.keys(rows[0])));
   }
   // --- TEMPORARY DEBUG LOGS (END) ---
 
