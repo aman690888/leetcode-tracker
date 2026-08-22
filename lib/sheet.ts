@@ -1,111 +1,67 @@
 /**
  * lib/sheet.ts
- * Fetches the teacher's live Google Sheet as CSV and parses assignments.
- * Column detection is fully dynamic — no hardcoded column indices.
+ *
+ * Fetches the teacher's live Google Sheet via the official Sheets API v4.
+ * This is a proper authenticated API call — no CSV scraping, no bot-detection issues.
+ *
+ * Required env vars:
+ *   GOOGLE_SHEETS_API_KEY  — API key restricted to Sheets API only
+ *   SHEET_ID               — the spreadsheet ID (between /d/ and /edit in the URL)
+ *   SHEET_RANGE            — sheet name or range, e.g. "Sheet1" or "Sheet1!A:E"
+ *
+ * Column detection is fully dynamic — no hardcoded column positions.
+ * The first row of the returned values is treated as the header row.
  */
 
 import { DayGroup, Problem } from "@/types";
 
-// ── Regex patterns ────────────────────────────────────────────────────────────
+// ── Regex patterns (identical to original CSV version) ────────────────────────
 const URL_RE      = /https:\/\/leetcode\.com\/problems\/([\w-]+)\//;
 const ID_PAREN_RE = /\((\d{1,5})\)/;
 const ID_LC_RE    = /(?:LeetCode\s+|LC[-\s]?)(\d{1,5})/i;
-// Strips "N." / "N. LeetCode ID –" prefix and "(ID)" suffix to get display title
 const TITLE_RE    = /^\d+[.)]\s*(?:LeetCode\s+\d+\s*[–\-]\s*)?(.+?)(?:\s*\(\d{1,5}\))?\s*$/;
-// Noise lines that aren't actual problem entries
 const NOISE_RE    = /^\s*(home\s*work|weekend\s*home|total\s*:|note\s*:|📝|📚|\u{1F4DD}|\u{1F4DA})/iu;
 
-// ── Minimal hand-rolled CSV parser (handles quoted multi-line cells) ──────────
-function parseCSV(raw: string): Record<string, string>[] {
-  const rows: Record<string, string>[] = [];
-  let headers: string[] = [];
-  let lineIdx = 0;
-  const allLines = raw.split(/\r?\n/);
-
-  while (lineIdx < allLines.length) {
-    const { fields, consumed } = readRow(allLines, lineIdx);
-    if (lineIdx === 0) {
-      headers = fields;
-    } else if (fields.some((f) => f.trim())) {
-      const row: Record<string, string> = {};
-      headers.forEach((h, i) => { row[h] = fields[i] ?? ""; });
-      rows.push(row);
-    }
-    lineIdx += consumed;
-  }
-  return rows;
+// ── Sheets API v4 response shape ──────────────────────────────────────────────
+interface SheetsApiResponse {
+  range?:          string;
+  majorDimension?: string;
+  /** Row-major 2-D array of cell values. Absent when sheet is empty. */
+  values?: string[][];
+  /** Present when the API returns an error (even with HTTP 200 sometimes). */
+  error?: { code: number; message: string; status: string };
 }
 
-function readRow(
-  lines: string[],
-  start: number
-): { fields: string[]; consumed: number } {
-  const fields: string[] = [];
-  let field = "";
-  let inQuote = false;
-  // Build a mutable "virtual" text we extend as we consume more lines
-  let text = lines[start] ?? "";
-  let lineCount = 1;
-  let ci = 0;
-
-  while (ci <= text.length) {
-    const ch = text[ci];
-
-    if (inQuote) {
-      if (ch === undefined) {
-        // Cell continues on next line
-        const next = lines[start + lineCount];
-        if (next !== undefined) {
-          text += "\n" + next;
-          lineCount++;
-          // don't advance ci — re-read the \n we just appended
-        } else {
-          // EOF inside quote — close gracefully
-          fields.push(field);
-          return { fields, consumed: lineCount };
-        }
-        continue;
-      }
-      if (ch === '"') {
-        if (text[ci + 1] === '"') { field += '"'; ci += 2; continue; }
-        inQuote = false; ci++; continue;
-      }
-      field += ch; ci++; continue;
-    }
-
-    // Not in quote
-    if (ch === '"') { inQuote = true; ci++; continue; }
-    if (ch === ",") { fields.push(field); field = ""; ci++; continue; }
-    if (ch === undefined) { fields.push(field); break; }
-    field += ch; ci++;
+// ── Dynamic column-index finder — no hardcoded positions ─────────────────────
+function findColIdx(headers: string[], ...keywords: string[]): number {
+  for (const kw of keywords) {
+    const idx = headers.findIndex((h) => h.trim().toLowerCase().includes(kw));
+    if (idx !== -1) return idx;
   }
-
-  return { fields, consumed: lineCount };
+  return -1;
 }
 
-// ── Column detection ──────────────────────────────────────────────────────────
-function findCol(headers: string[], ...kws: string[]): string | undefined {
-  for (const kw of kws) {
-    const found = headers.find((h) => h.trim().toLowerCase().includes(kw));
-    if (found) return found;
-  }
-  return undefined;
-}
-
-// ── Problem cell parser ───────────────────────────────────────────────────────
+// ── Problem cell parser (identical logic to original CSV version) ─────────────
 function extractProblems(cell: string): Omit<Problem, "solved">[] {
   const lines = cell.split(/\r?\n/).map((l) => l.replace(/,\s*$/, "").trim());
   const results: Omit<Problem, "solved">[] = [];
   let pendingTitle: string | null = null;
-  let pendingId: string | null    = null;
+  let pendingId:    string | null = null;
 
   for (const line of lines) {
-    if (!line || NOISE_RE.test(line)) { pendingTitle = null; pendingId = null; continue; }
+    if (!line || NOISE_RE.test(line)) {
+      pendingTitle = null;
+      pendingId    = null;
+      continue;
+    }
 
     const urlMatch = URL_RE.exec(line);
     if (urlMatch) {
-      const slug = urlMatch[1];
-      const fallback = slug.split("-").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+      const slug     = urlMatch[1];
+      const fallback = slug
+        .split("-")
+        .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+        .join(" ");
       results.push({
         slug,
         id:    pendingId,
@@ -117,7 +73,7 @@ function extractProblems(cell: string): Omit<Problem, "solved">[] {
       continue;
     }
 
-    // Title line — extract display name + problem number
+    // Title line — extract display name + problem ID
     const idM = ID_PAREN_RE.exec(line) ?? ID_LC_RE.exec(line);
     if (idM) pendingId = idM[1];
 
@@ -130,114 +86,75 @@ function extractProblems(cell: string): Omit<Problem, "solved">[] {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 export async function fetchAssignments(): Promise<DayGroup[]> {
-  const csvUrlRaw = process.env.SHEET_CSV_URL;
-  // Trim any accidental whitespace or invisible chars that may appear in Vercel env vars
-  const csvUrl = csvUrlRaw?.trim();
+  const apiKey  = process.env.GOOGLE_SHEETS_API_KEY?.trim();
+  const sheetId = process.env.SHEET_ID?.trim();
+  const range   = process.env.SHEET_RANGE?.trim() ?? "Sheet1";
 
-  // --- TEMPORARY DEBUG LOGS (START) ---
-  console.log("[DEBUG] SHEET_CSV_URL raw length:", csvUrlRaw?.length ?? 0);
-  console.log("[DEBUG] SHEET_CSV_URL trimmed:", csvUrl ? csvUrl.slice(0, 80) + "..." : "NOT SET");
-  // --- TEMPORARY DEBUG LOGS (END) ---
+  if (!apiKey)  throw new Error("GOOGLE_SHEETS_API_KEY env var is not set.");
+  if (!sheetId) throw new Error("SHEET_ID env var is not set.");
 
-  if (!csvUrl) throw new Error("SHEET_CSV_URL environment variable is not set.");
+  // Sheets API v4 values.get endpoint — designed for programmatic access
+  const apiUrl =
+    `https://sheets.googleapis.com/v4/spreadsheets/` +
+    `${sheetId}/values/${encodeURIComponent(range)}` +
+    `?key=${apiKey}`;
 
   let res: Response;
   try {
-    res = await fetch(csvUrl, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (compatible; lc-tracker/1.0)",
-        "Accept": "text/csv, text/plain, */*",
-      },
-      redirect: "follow",
-      cache: "no-store",
+    res = await fetch(apiUrl, {
+      headers: { Accept: "application/json" },
+      cache: "no-store",   // always re-fetch — no stale data
     });
-  } catch (fetchErr: unknown) {
-    const e = fetchErr as Error;
-    console.error("[DEBUG] fetch() threw:", e.message);
-    throw new Error(`Sheet network error: ${e.message}`);
+  } catch (e: unknown) {
+    throw new Error(`Sheets API network error: ${(e as Error).message}`);
   }
 
-  // --- TEMPORARY DEBUG LOGS (START) ---
-  // 1. Full response metadata after all redirects
-  console.log("[DEBUG] 1. HTTP status:", res.status, res.statusText);
-  console.log("[DEBUG]    Redirected:", res.redirected);
-  console.log("[DEBUG]    Final URL (full):", res.url ?? "(none)");
+  const json = (await res.json()) as SheetsApiResponse;
 
-  // 2. All response headers — content-type is the key indicator
-  const headerMap: Record<string, string> = {};
-  res.headers.forEach((val, key) => { headerMap[key] = val; });
-  console.log("[DEBUG] 2. Response headers:", JSON.stringify(headerMap));
-  // --- TEMPORARY DEBUG LOGS (END) ---
-
-  if (!res.ok) {
-    throw new Error(`Sheet fetch failed: HTTP ${res.status}. Make sure the sheet is shared publicly.`);
+  if (!res.ok || json.error) {
+    const msg = json.error?.message ?? `HTTP ${res.status}`;
+    throw new Error(`Sheets API error: ${msg}`);
   }
 
-  const rawText = await res.text();
+  const allRows = json.values ?? [];
 
-  // --- TEMPORARY DEBUG LOGS (START) ---
-  // 3. Body analysis — status re-check + first 1000 chars + HTML detection
-  const preview1000 = rawText.slice(0, 1000);
-  const looksLikeHtml = rawText.trimStart().startsWith("<");
-  console.log("[DEBUG] 3. Body length:", rawText.length, "chars");
-  console.log("[DEBUG]    Status at HTML-check:", res.status);
-  console.log("[DEBUG]    Content-Type header:", res.headers.get("content-type") ?? "(missing)");
-  console.log("[DEBUG]    Looks like HTML:", looksLikeHtml);
-  console.log("[DEBUG]    First 1000 chars of body:", JSON.stringify(preview1000));
-  // --- TEMPORARY DEBUG LOGS (END) ---
+  // API returns no values property when the sheet has no data
+  if (allRows.length < 2) return [];
 
-  if (looksLikeHtml) {
-    // Include first 500 chars in error message so it appears in Vercel error logs too
-    throw new Error(
-      `Sheet fetch returned HTML instead of CSV (status ${res.status}). ` +
-      `Content-Type: ${res.headers.get("content-type") ?? "none"}. ` +
-      `Body starts: ${rawText.slice(0, 500)}`
-    );
-  }
+  const [headerRow, ...dataRows] = allRows;
 
-  const rows = parseCSV(rawText);
-
-  // --- TEMPORARY DEBUG LOGS (START) ---
-  // 3. Number of rows successfully parsed + headers detected
-  console.log("[DEBUG] 3. Number of parsed CSV rows:", rows.length);
-  if (rows.length > 0) {
-    console.log("[DEBUG]    Parsed CSV headers:", JSON.stringify(Object.keys(rows[0])));
-  }
-  // --- TEMPORARY DEBUG LOGS (END) ---
-
-  if (rows.length === 0) return [];
-
-  const headers     = Object.keys(rows[0]);
-  const dayCol      = findCol(headers, "week day", "weekday", "day");
-  const dateCol     = findCol(headers, "date");
-  const weekCol     = findCol(headers, "days", "week");
-  const problemCol  = findCol(headers, "problem");
-  const weekendCol  = findCol(headers, "weekend");
-  const effectiveWe = weekendCol !== problemCol ? weekendCol : undefined;
+  // ── Dynamic column detection ──────────────────────────────────────────────
+  const dayIdx     = findColIdx(headerRow, "week day", "weekday", "day");
+  const dateIdx    = findColIdx(headerRow, "date");
+  const weekIdx    = findColIdx(headerRow, "days", "week");
+  const probIdx    = findColIdx(headerRow, "problem");
+  const weekendIdx = findColIdx(headerRow, "weekend");
+  // Don't treat weekend as its own column if it mapped to the same index as problems
+  const effectiveWeekendIdx = (weekendIdx !== -1 && weekendIdx !== probIdx) ? weekendIdx : -1;
 
   const groups: DayGroup[] = [];
 
-  for (const row of rows) {
-    const dayVal  = (row[dayCol  ?? ""] ?? "").trim();
-    const dateVal = (row[dateCol ?? ""] ?? "").trim();
-    const weekVal = (row[weekCol ?? ""] ?? "").trim();
+  for (const row of dataRows) {
+    const dayVal  = (row[dayIdx]  ?? "").trim();
+    const dateVal = (row[dateIdx] ?? "").trim();
+    const weekVal = (row[weekIdx] ?? "").trim();
     if (!dayVal && !dateVal) continue;
 
     const label = [dayVal, dateVal].filter(Boolean).join(", ");
 
-    for (const [kind, col] of [
-      ["daily",   problemCol],
-      ["weekend", effectiveWe],
-    ] as Array<["daily" | "weekend", string | undefined]>) {
-      if (!col) continue;
-      const cell = (row[col] ?? "").trim();
+    for (const [kind, idx] of [
+      ["daily",   probIdx],
+      ["weekend", effectiveWeekendIdx],
+    ] as Array<["daily" | "weekend", number]>) {
+      if (idx < 0) continue;
+      const cell = (row[idx] ?? "").trim();
       if (!cell) continue;
       const raw = extractProblems(cell);
       if (!raw.length) continue;
 
       groups.push({
         label,
-        week: weekVal,
+        week:        weekVal,
         kind,
         problems:    raw.map((p) => ({ ...p, solved: false })),
         solvedCount: 0,

@@ -59,18 +59,12 @@ export async function GET(
     );
   }
 
-  // 2. Fetch sheet assignments
+  // 2. Fetch sheet assignments via Sheets API v4
   let groups;
   try {
     groups = await fetchAssignments();
-    // --- TEMPORARY DEBUG LOGS (START) ---
-    console.log("[DEBUG] Total assignment groups returned from fetchAssignments:", groups.length);
-    const totalProblemsParsed = groups.reduce((acc, g) => acc + g.problems.length, 0);
-    console.log("[DEBUG] Total assigned problems count across all groups:", totalProblemsParsed);
-    // --- TEMPORARY DEBUG LOGS (END) ---
   } catch (err: unknown) {
     const e = err as Error;
-    console.error("[DEBUG] Error caught during fetchAssignments:", e.message);
     return NextResponse.json(
       { error: `Could not load the assignment sheet: ${e.message}`, code: "SHEET_FETCH_FAILED" } satisfies TrackError,
       { status: 502 }

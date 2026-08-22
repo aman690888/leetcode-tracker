@@ -4,10 +4,11 @@ A Next.js web app that tracks your DSA homework progress against your live LeetC
 
 ## Features
 
-- **Live sheet** — re-fetches your teacher's Google Sheet on every request (no stale data)
-- **Dynamic parsing** — column structure re-inspected each time; handles sheet edits automatically
-- **Authenticated LeetCode** — uses your session cookies to fetch your **full** solved history (not just recent 20)
-- **Graceful fallback** — if session is missing/expired, shows recent solves + a warning banner instead of crashing
+- **Google Sheets API v4** — fetches the live assignment sheet via a proper authenticated API call (no CSV scraping, no bot-detection issues)
+- **Dynamic column detection** — column structure re-inspected each time; handles sheet edits automatically
+- **LeetCode GraphQL** — server-side fetch to avoid CORS; no auth required for basic use
+- **Full solved-history** — uses your session cookies (stored in browser localStorage) to fetch your complete AC problem list
+- **Graceful fallback** — if session is missing/expired, falls back to ~20 recent solves with a warning banner
 - **Shareable URLs** — `?user=yourusername` in URL for bookmarking
 - **Terminal aesthetic** — dark, monospace, intentional design
 
@@ -26,40 +27,60 @@ npm install
 cp .env.local.example .env.local
 ```
 
-Edit `.env.local` with three values:
+Edit `.env.local` with these values:
 
-#### `SHEET_CSV_URL` (required)
-The Google Sheets CSV export URL. Sheet must be shared as **"Anyone with the link can view"**.
+---
+
+#### `GOOGLE_SHEETS_API_KEY` (required)
+
+A Google API key restricted to the Sheets API.
+
+**How to get one:**
+1. Go to [console.cloud.google.com](https://console.cloud.google.com)
+2. Create a project (or use an existing one)
+3. Go to **APIs & Services → Library** → search **"Google Sheets API"** → Enable it
+4. Go to **APIs & Services → Credentials** → **Create Credentials → API Key**
+5. Click **Edit key** → under **API restrictions**, select **Restrict key** → choose **Google Sheets API**
+6. Copy the key
+
+The sheet must be shared as **"Anyone with the link can view"** (viewer access is enough for the Sheets API with just an API key — no OAuth needed).
+
+---
+
+#### `SHEET_ID` (required)
+
+The spreadsheet ID — the long string between `/d/` and `/edit` in the Google Sheets URL.
 
 ```
-SHEET_CSV_URL=https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID/export?format=csv&gid=0
+https://docs.google.com/spreadsheets/d/THIS_IS_THE_ID/edit
 ```
+
+---
+
+#### `SHEET_RANGE` (required)
+
+The sheet tab name or cell range to fetch. Examples:
+- `Sheet1` — entire first tab
+- `Sheet1!A:E` — columns A through E of the first tab
+- `DSA Homework!A:F` — a tab named "DSA Homework"
+
+If your sheet tab is named something other than "Sheet1", update this value.
+
+---
 
 #### `LEETCODE_SESSION` + `LEETCODE_CSRF_TOKEN` (strongly recommended)
 
 These enable **full solved-history matching** instead of only the ~20 most recent submissions.
 
 **How to extract them:**
-
 1. Open [leetcode.com](https://leetcode.com) while logged in
 2. Press `F12` → **Application** tab → **Storage → Cookies → `https://leetcode.com`**
-3. Find and copy the **Value** of each cookie:
+3. Copy the **Value** of `LEETCODE_SESSION` and `csrftoken`
+4. Paste into `.env.local` as `LEETCODE_SESSION=...` and `LEETCODE_CSRF_TOKEN=...`
 
-| Cookie name | Looks like |
-|---|---|
-| `LEETCODE_SESSION` | Long JWT string starting with `eyJ...` (~300 chars) |
-| `csrftoken` | Shorter alphanumeric string (~64 chars) |
+> **Security:** `.env.local` is covered by `.gitignore` (`.env*`). Session cookies are stored in your **browser localStorage** on the deployed app and sent as request headers — never persisted server-side.
 
-4. Paste into `.env.local`:
-
-```
-LEETCODE_SESSION=eyJ0eXAiOiJKV1Q...
-LEETCODE_CSRF_TOKEN=abc123xyz...
-```
-
-5. Restart the dev server (`npm run dev`)
-
-> **Security:** `.env.local` is covered by `.gitignore` (line 34: `.env*`). These values never appear in code, logs, or committed files. For Vercel deployment, add them in **Project Settings → Environment Variables**.
+---
 
 ### 3. Run locally
 
@@ -73,20 +94,12 @@ Open [http://localhost:3000](http://localhost:3000), enter your LeetCode usernam
 
 1. Push this directory to GitHub
 2. Import the repo in [vercel.com](https://vercel.com)
-3. Add all three env vars in **Project Settings → Environment Variables**
-4. Deploy — no other config needed
-
-## Known constraints
-
-### Authenticated mode is tied to the session owner
-
-When `LEETCODE_SESSION` is set, the tracker fetches solved problems for **whoever owns that session** — not necessarily the username entered in the UI. For your own personal use (tracking your own assignments), this is exactly correct. If you share this deployment with classmates and they enter their own usernames, their results will still reflect your solved problems.
-
-This is a deliberate trade-off for a personal tool. If you need true per-user tracking, each user would need to provide their own session cookies.
-
-### Session cookies expire
-
-LeetCode sessions typically expire every few weeks. When expired, the tracker automatically falls back to recent-submissions mode and shows a warning banner. Re-extract the cookies from DevTools and update `.env.local` (and Vercel env vars) to restore full-history mode.
+3. Add these env vars in **Project Settings → Environment Variables**:
+   - `GOOGLE_SHEETS_API_KEY`
+   - `SHEET_ID`
+   - `SHEET_RANGE`
+4. For LeetCode session cookies: use the **⚙ config** button in the deployed app's UI — cookies are saved in your browser's `localStorage` and sent directly with each request (no Vercel env vars needed for these)
+5. Deploy
 
 ## Project structure
 
@@ -100,9 +113,10 @@ app/
 components/
   ResultsView.tsx     Summary stats + progress bar + toggle + warning banner
   ProblemGroup.tsx    Day group with problem checklist rows
+  SettingsPanel.tsx   Browser-localStorage session config modal
 
 lib/
-  sheet.ts            Google Sheet CSV fetch + dynamic parser
+  sheet.ts            Google Sheets API v4 fetch + parser
   leetcode.ts         LeetCode GraphQL — auth fetch with fallback
 
 types/
@@ -113,6 +127,18 @@ types/
 
 | Variable | Required | Description |
 |---|---|---|
-| `SHEET_CSV_URL` | ✅ Yes | Full CSV export URL of the Google Sheet |
-| `LEETCODE_SESSION` | Recommended | LeetCode session cookie for full history |
-| `LEETCODE_CSRF_TOKEN` | Recommended | LeetCode CSRF token (paired with session) |
+| `GOOGLE_SHEETS_API_KEY` | ✅ Yes | Google API key restricted to Sheets API |
+| `SHEET_ID` | ✅ Yes | Spreadsheet ID from the sheet URL |
+| `SHEET_RANGE` | ✅ Yes | Tab name or range, e.g. `Sheet1` |
+| `LEETCODE_SESSION` | Recommended | LeetCode session cookie (server-side fallback) |
+| `LEETCODE_CSRF_TOKEN` | Recommended | LeetCode CSRF token (server-side fallback) |
+
+## Known constraints
+
+### Authenticated LeetCode mode is tied to the session owner
+
+When session cookies are configured (either in browser localStorage via ⚙ config, or in env vars), the tracker fetches solved problems for **whoever owns that session** — not necessarily the username entered in the UI. For personal use this is exactly correct.
+
+### Session cookies expire
+
+LeetCode sessions expire every few weeks. When expired, the app automatically falls back to recent-submissions mode and shows a warning banner with a link to the ⚙ config panel to re-paste fresh cookies.
