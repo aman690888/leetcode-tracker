@@ -2,20 +2,18 @@
  * lib/sheet.ts
  *
  * Fetches the teacher's live Google Sheet via the official Sheets API v4.
- * This is a proper authenticated API call — no CSV scraping, no bot-detection issues.
+ * Uses a two-tier caching strategy (in-memory + Next.js Data Cache) with 3-minute TTL
+ * so multiple concurrent students do not overwhelm Google's rate limits.
  *
  * Required env vars:
  *   GOOGLE_SHEETS_API_KEY  — API key restricted to Sheets API only
- *   SHEET_ID               — the spreadsheet ID (between /d/ and /edit in the URL)
- *   SHEET_RANGE            — sheet name or range, e.g. "Sheet1" or "Sheet1!A:E"
- *
- * Column detection is fully dynamic — no hardcoded column positions.
- * The first row of the returned values is treated as the header row.
+ *   SHEET_ID               — spreadsheet ID from the URL
+ *   SHEET_RANGE            — sheet name or range (defaults to "Sheet1")
  */
 
 import { DayGroup, Problem } from "@/types";
 
-// ── Regex patterns (identical to original CSV version) ────────────────────────
+// ── Regex patterns ────────────────────────────────────────────────────────────
 const URL_RE      = /https:\/\/leetcode\.com\/problems\/([\w-]+)\//;
 const ID_PAREN_RE = /\((\d{1,5})\)/;
 const ID_LC_RE    = /(?:LeetCode\s+|LC[-\s]?)(\d{1,5})/i;
@@ -26,13 +24,31 @@ const NOISE_RE    = /^\s*(home\s*work|weekend\s*home|total\s*:|note\s*:|📝|�
 interface SheetsApiResponse {
   range?:          string;
   majorDimension?: string;
-  /** Row-major 2-D array of cell values. Absent when sheet is empty. */
-  values?: string[][];
-  /** Present when the API returns an error (even with HTTP 200 sometimes). */
-  error?: { code: number; message: string; status: string };
+  values?:         string[][];
+  error?:          { code: number; message: string; status: string };
 }
 
-// ── Dynamic column-index finder — no hardcoded positions ─────────────────────
+// ── Server-Side In-Memory Cache (Tier 1) ───────────────────────────────────────
+interface CachedAssignments {
+  data:      DayGroup[];
+  timestamp: number;
+}
+
+let memoryCache: CachedAssignments | null = null;
+const CACHE_TTL_MS = 3 * 60 * 1000; // 3 minutes
+
+/**
+ * Deep-clones DayGroup array so that mutating problem.solved or solvedCount
+ * for one student's request never pollutes cached state for other students.
+ */
+function cloneGroups(groups: DayGroup[]): DayGroup[] {
+  return groups.map((g) => ({
+    ...g,
+    problems: g.problems.map((p) => ({ ...p })),
+  }));
+}
+
+// ── Dynamic column detection ──────────────────────────────────────────────────
 function findColIdx(headers: string[], ...keywords: string[]): number {
   for (const kw of keywords) {
     const idx = headers.findIndex((h) => h.trim().toLowerCase().includes(kw));
@@ -41,7 +57,7 @@ function findColIdx(headers: string[], ...keywords: string[]): number {
   return -1;
 }
 
-// ── Problem cell parser (identical logic to original CSV version) ─────────────
+// ── Problem cell parser ───────────────────────────────────────────────────────
 function extractProblems(cell: string): Omit<Problem, "solved">[] {
   const lines = cell.split(/\r?\n/).map((l) => l.replace(/,\s*$/, "").trim());
   const results: Omit<Problem, "solved">[] = [];
@@ -86,6 +102,13 @@ function extractProblems(cell: string): Omit<Problem, "solved">[] {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 export async function fetchAssignments(): Promise<DayGroup[]> {
+  const now = Date.now();
+
+  // Return fresh in-memory cache if available (0ms response, zero API calls)
+  if (memoryCache && now - memoryCache.timestamp < CACHE_TTL_MS) {
+    return cloneGroups(memoryCache.data);
+  }
+
   const apiKey  = process.env.GOOGLE_SHEETS_API_KEY?.trim();
   const sheetId = process.env.SHEET_ID?.trim();
   const range   = process.env.SHEET_RANGE?.trim() ?? "Sheet1";
@@ -93,7 +116,6 @@ export async function fetchAssignments(): Promise<DayGroup[]> {
   if (!apiKey)  throw new Error("GOOGLE_SHEETS_API_KEY env var is not set.");
   if (!sheetId) throw new Error("SHEET_ID env var is not set.");
 
-  // Sheets API v4 values.get endpoint — designed for programmatic access
   const apiUrl =
     `https://sheets.googleapis.com/v4/spreadsheets/` +
     `${sheetId}/values/${encodeURIComponent(range)}` +
@@ -103,33 +125,53 @@ export async function fetchAssignments(): Promise<DayGroup[]> {
   try {
     res = await fetch(apiUrl, {
       headers: { Accept: "application/json" },
-      cache: "no-store",   // always re-fetch — no stale data
+      next:    { revalidate: 180 }, // Next.js Data Cache: 3 minutes
     });
   } catch (e: unknown) {
+    // If network fails but we have stale cache, serve stale cache instead of breaking
+    if (memoryCache) {
+      console.warn("[tracker] Sheets network error — serving stale cached assignments.");
+      return cloneGroups(memoryCache.data);
+    }
     throw new Error(`Sheets API network error: ${(e as Error).message}`);
   }
 
   const json = (await res.json()) as SheetsApiResponse;
 
+  // Handle Google API rate limits (HTTP 429 or RESOURCE_EXHAUSTED)
+  const isRateLimited =
+    res.status === 429 ||
+    json.error?.code === 429 ||
+    json.error?.status === "RESOURCE_EXHAUSTED";
+
+  if (isRateLimited) {
+    if (memoryCache) {
+      console.warn("[tracker] Sheets API rate limit reached — serving stale cached assignments.");
+      return cloneGroups(memoryCache.data);
+    }
+    throw new Error("Too many people checking right now — Google Sheets API rate limit reached. Please wait a minute and refresh.");
+  }
+
   if (!res.ok || json.error) {
+    if (memoryCache) {
+      console.warn("[tracker] Sheets API error — serving stale cached assignments.");
+      return cloneGroups(memoryCache.data);
+    }
     const msg = json.error?.message ?? `HTTP ${res.status}`;
     throw new Error(`Sheets API error: ${msg}`);
   }
 
   const allRows = json.values ?? [];
-
-  // API returns no values property when the sheet has no data
   if (allRows.length < 2) return [];
 
   const [headerRow, ...dataRows] = allRows;
 
-  // ── Dynamic column detection ──────────────────────────────────────────────
+  // Dynamic column detection
   const dayIdx     = findColIdx(headerRow, "week day", "weekday", "day");
   const dateIdx    = findColIdx(headerRow, "date");
   const weekIdx    = findColIdx(headerRow, "days", "week");
   const probIdx    = findColIdx(headerRow, "problem");
   const weekendIdx = findColIdx(headerRow, "weekend");
-  // Don't treat weekend as its own column if it mapped to the same index as problems
   const effectiveWeekendIdx = (weekendIdx !== -1 && weekendIdx !== probIdx) ? weekendIdx : -1;
 
   const groups: DayGroup[] = [];
@@ -163,5 +205,11 @@ export async function fetchAssignments(): Promise<DayGroup[]> {
     }
   }
 
-  return groups;
+  // Update in-memory cache
+  memoryCache = {
+    data:      groups,
+    timestamp: Date.now(),
+  };
+
+  return cloneGroups(groups);
 }
