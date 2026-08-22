@@ -148,7 +148,7 @@ export async function fetchAssignments(): Promise<DayGroup[]> {
         "User-Agent": "Mozilla/5.0 (compatible; lc-tracker/1.0)",
         "Accept": "text/csv, text/plain, */*",
       },
-      redirect: "follow",  // explicitly follow Google's 307 redirect
+      redirect: "follow",
       cache: "no-store",
     });
   } catch (fetchErr: unknown) {
@@ -158,10 +158,15 @@ export async function fetchAssignments(): Promise<DayGroup[]> {
   }
 
   // --- TEMPORARY DEBUG LOGS (START) ---
-  // 1. HTTP status + whether a redirect happened
-  console.log("[DEBUG] 1. Sheet fetch HTTP status:", res.status, res.statusText);
+  // 1. Full response metadata after all redirects
+  console.log("[DEBUG] 1. HTTP status:", res.status, res.statusText);
   console.log("[DEBUG]    Redirected:", res.redirected);
-  console.log("[DEBUG]    Final URL (first 80):", res.url?.slice(0, 80));
+  console.log("[DEBUG]    Final URL (full):", res.url ?? "(none)");
+
+  // 2. All response headers — content-type is the key indicator
+  const headerMap: Record<string, string> = {};
+  res.headers.forEach((val, key) => { headerMap[key] = val; });
+  console.log("[DEBUG] 2. Response headers:", JSON.stringify(headerMap));
   // --- TEMPORARY DEBUG LOGS (END) ---
 
   if (!res.ok) {
@@ -171,16 +176,23 @@ export async function fetchAssignments(): Promise<DayGroup[]> {
   const rawText = await res.text();
 
   // --- TEMPORARY DEBUG LOGS (START) ---
-  // 2. First 300 chars of raw body — reveals if it's CSV or an HTML page
-  const preview = rawText.slice(0, 300);
-  const looksLikeHtml = preview.trimStart().startsWith("<");
-  console.log("[DEBUG] 2. Body length:", rawText.length);
+  // 3. Body analysis — status re-check + first 1000 chars + HTML detection
+  const preview1000 = rawText.slice(0, 1000);
+  const looksLikeHtml = rawText.trimStart().startsWith("<");
+  console.log("[DEBUG] 3. Body length:", rawText.length, "chars");
+  console.log("[DEBUG]    Status at HTML-check:", res.status);
+  console.log("[DEBUG]    Content-Type header:", res.headers.get("content-type") ?? "(missing)");
   console.log("[DEBUG]    Looks like HTML:", looksLikeHtml);
-  console.log("[DEBUG]    Raw preview (first 300):", JSON.stringify(preview));
+  console.log("[DEBUG]    First 1000 chars of body:", JSON.stringify(preview1000));
   // --- TEMPORARY DEBUG LOGS (END) ---
 
   if (looksLikeHtml) {
-    throw new Error("Sheet fetch returned an HTML page instead of CSV. Check sheet sharing permissions (must be 'Anyone with the link can view').");
+    // Include first 500 chars in error message so it appears in Vercel error logs too
+    throw new Error(
+      `Sheet fetch returned HTML instead of CSV (status ${res.status}). ` +
+      `Content-Type: ${res.headers.get("content-type") ?? "none"}. ` +
+      `Body starts: ${rawText.slice(0, 500)}`
+    );
   }
 
   const rows = parseCSV(rawText);
