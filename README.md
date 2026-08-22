@@ -8,6 +8,14 @@ Pulls the live assignment sheet straight from Google Sheets, cross-references it
 
 ---
 
+## 👤 Author & Open Source
+
+Created by **[Aman Rawat](https://github.com/aman690888)**.
+
+This is an open-source personal project designed to simplify DSA homework tracking. Contributions, issues, and forks are welcome under the [MIT License](LICENSE). The assignment extraction engine and LeetCode GraphQL integration were built and refined to handle live Google Sheets API v4 parsing with zero bot-detection issues and multi-user privacy.
+
+---
+
 ## Using it day-to-day
 
 ### Basic usage

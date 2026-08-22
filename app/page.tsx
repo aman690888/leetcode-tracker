@@ -301,6 +301,42 @@ function TrackerInner() {
         )}
       </main>
 
+      {/* ── Footer ──────────────────────────────────────────────────────────── */}
+      <footer style={{
+        borderTop:      "1px solid var(--border)",
+        padding:        "16px 24px",
+        marginTop:      "auto",
+        display:        "flex",
+        alignItems:     "center",
+        justifyContent: "space-between",
+        flexWrap:       "wrap",
+        gap:            "12px",
+        fontSize:       "12px",
+        fontFamily:     "var(--font-mono)",
+        color:          "var(--text-muted)",
+      }}>
+        <span>
+          tracker.sh <span style={{ color: "var(--border)" }}>·</span> open source
+        </span>
+        <span>
+          built by{" "}
+          <a
+            href="https://github.com/aman690888"
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{
+              color:          "var(--text-secondary)",
+              textDecoration: "none",
+              transition:     "color 0.15s",
+            }}
+            onMouseEnter={(e) => { (e.currentTarget as HTMLAnchorElement).style.color = "var(--blue)"; }}
+            onMouseLeave={(e) => { (e.currentTarget as HTMLAnchorElement).style.color = "var(--text-secondary)"; }}
+          >
+            Aman Rawat ↗
+          </a>
+        </span>
+      </footer>
+
       {/* ── Settings panel ──────────────────────────────────────────────────── */}
       <SettingsPanel
         open={settingsOpen}

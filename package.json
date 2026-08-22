@@ -2,6 +2,8 @@
   "name": "leetcode-tracker",
   "version": "0.1.0",
   "private": true,
+  "author": "Aman Rawat",
+  "license": "MIT",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
