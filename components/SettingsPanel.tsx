@@ -208,6 +208,8 @@ export default function SettingsPanel({ open, onClose, onCredsChange }: Props) {
             lineHeight:  "1.7",
             marginBottom: "20px",
           }}>
+            <span style={{ color: "var(--amber)", fontWeight: 600 }}>Required:</span> Enables accurate, full-history solved matching for your account.
+            <br />
             Source:{" "}
             <span style={{ color: "var(--text-secondary)" }}>leetcode.com</span>
             {" "}(logged in) → F12 → Application → Cookies →{" "}

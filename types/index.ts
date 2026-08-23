@@ -15,8 +15,6 @@ export interface DayGroup {
   totalCount: number;
 }
 
-export type SolveMode = "full" | "limited";
-
 export interface TrackResponse {
   username: string;
   totalAssigned: number;
@@ -24,12 +22,17 @@ export interface TrackResponse {
   percentage: number;
   groups: DayGroup[];
   fetchedAt: string;
-  /** "full" = authenticated, complete history.  "limited" = recent 20 only. */
-  solveMode: SolveMode;
-  solveModeWarning?: string;
 }
+
+export type TrackErrorCode =
+  | "AUTH_REQUIRED"
+  | "AUTH_EXPIRED"
+  | "USER_NOT_FOUND"
+  | "SHEET_FETCH_FAILED"
+  | "LEETCODE_FETCH_FAILED"
+  | "UNKNOWN";
 
 export interface TrackError {
   error: string;
-  code: "USER_NOT_FOUND" | "SHEET_FETCH_FAILED" | "LEETCODE_FETCH_FAILED" | "UNKNOWN";
+  code: TrackErrorCode;
 }

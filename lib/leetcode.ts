@@ -1,21 +1,18 @@
 /**
  * lib/leetcode.ts
  *
- * Two strategies for fetching solved problems:
+ * Authenticated LeetCode GraphQL fetch for accurate, full-history solved problems.
+ * Queries `questionList` with `filters:{status:"AC"}` and paginates through all pages.
  *
- * 1. AUTHENTICATED (full history) — uses a { session, csrf } credential pair.
- *    Priority: client-sent request headers  >  server env vars.
- *    Queries `questionList` with `filters:{status:"AC"}`, paginates all pages.
+ * Session cookies (LEETCODE_SESSION + csrftoken) are MANDATORY.
+ * Fallback to recent-submissions is intentionally removed to prevent inaccurate tracking.
  *
- * 2. FALLBACK (recent ~20 only) — unauthenticated `recentAcSubmissionList`.
- *    Triggered when no creds are available OR auth returns empty / errors.
- *
- * Credentials are NEVER logged, NEVER persisted server-side.
+ * Credentials are NEVER logged and NEVER persisted server-side.
  */
 
 const GRAPHQL_URL = "https://leetcode.com/graphql";
 
-// ── Base request builder ───────────────────────────────────────────────────────
+// ── Base GraphQL request builder ───────────────────────────────────────────────
 async function gql(
   query: string,
   variables: Record<string, unknown>,
@@ -45,16 +42,13 @@ const PROFILE_QUERY = `
   query userPublicProfile($username: String!) {
     matchedUser(username: $username) {
       username
-      submitStatsGlobal {
-        acSubmissionNum { difficulty count }
-      }
     }
   }
 `;
 
 /**
- * The same query LeetCode's own problem list uses when you click "Solved".
- * Returns all AC problems for the session owner when auth cookies are present.
+ * Authenticated query: returns all AC problems for the session owner.
+ * LeetCode uses this exact query on its own problem-list page ("Solved" filter).
  */
 const AC_PROBLEMS_AUTH_QUERY = `
   query problemsetQuestionList(
@@ -77,15 +71,6 @@ const AC_PROBLEMS_AUTH_QUERY = `
   }
 `;
 
-/** Unauthenticated fallback — LeetCode caps this at ~20 regardless of limit. */
-const RECENT_AC_QUERY = `
-  query recentAcSubmissions($username: String!, $limit: Int!) {
-    recentAcSubmissionList(username: $username, limit: $limit) {
-      titleSlug
-    }
-  }
-`;
-
 // ── Types ──────────────────────────────────────────────────────────────────────
 interface AcPage {
   total: number;
@@ -98,11 +83,6 @@ export interface Creds {
 }
 
 // ── Credential resolution ──────────────────────────────────────────────────────
-/**
- * Returns effective creds with client-supplied values taking priority over env.
- * Client values come from localStorage on the browser, sent as request headers
- * — they are never stored server-side.
- */
 export function resolveCreds(clientOverride?: Creds): Creds | null {
   if (clientOverride?.session && clientOverride?.csrf) return clientOverride;
   const session = process.env.LEETCODE_SESSION?.trim();
@@ -112,14 +92,13 @@ export function resolveCreds(clientOverride?: Creds): Creds | null {
 }
 
 function authHeaders(creds: Creds): Record<string, string> {
-  // Values are only used here as header strings — never logged
   return {
     Cookie:        `LEETCODE_SESSION=${creds.session}; csrftoken=${creds.csrf}`,
     "x-csrftoken": creds.csrf,
   };
 }
 
-// ── Strategy 1: Authenticated full-history ─────────────────────────────────────
+// ── Authenticated full-history fetch ───────────────────────────────────────────
 async function fetchAllSolvedAuth(creds: Creds): Promise<Set<string>> {
   const slugs = new Set<string>();
   const limit = 500;
@@ -128,86 +107,68 @@ async function fetchAllSolvedAuth(creds: Creds): Promise<Set<string>> {
 
   while (skip < total) {
     // eslint-disable-next-line no-await-in-loop
-    const raw = await gql(
+    const raw = (await gql(
       AC_PROBLEMS_AUTH_QUERY,
       { categorySlug: "", limit, skip, filters: { status: "AC" } },
       authHeaders(creds)
-    ) as { data?: { problemsetQuestionList?: AcPage } };
+    )) as { data?: { problemsetQuestionList?: AcPage } };
 
     const page = raw?.data?.problemsetQuestionList;
-    // Null page = session expired / bad token — signal caller to fall back
-    if (!page) return new Set();
+    if (!page) {
+      const err = new Error("Session expired or invalid — please refresh your cookies in settings.");
+      (err as Error & { code: string }).code = "AUTH_EXPIRED";
+      throw err;
+    }
 
     total = page.total;
     for (const q of page.questions) slugs.add(q.titleSlug);
     skip += limit;
-    if (skip > total + limit) break; // safety
+    if (skip > total + limit) break;
   }
 
   return slugs;
-}
-
-// ── Strategy 2: Unauthenticated recent submissions ─────────────────────────────
-async function fetchRecentAcSlugs(username: string): Promise<Set<string>> {
-  const raw = await gql(RECENT_AC_QUERY, { username, limit: 20 }) as {
-    data?: { recentAcSubmissionList?: { titleSlug: string }[] };
-  };
-  return new Set((raw?.data?.recentAcSubmissionList ?? []).map((s) => s.titleSlug));
 }
 
 // ── Public API ─────────────────────────────────────────────────────────────────
 
 /** Verifies the user exists. Throws { code: "USER_NOT_FOUND" } if not. */
 export async function verifyUser(username: string): Promise<void> {
-  const raw = await gql(PROFILE_QUERY, { username }) as {
+  const raw = (await gql(PROFILE_QUERY, { username })) as {
     data?: { matchedUser?: { username: string } };
   };
   if (!raw?.data?.matchedUser) {
-    const err = new Error(`LeetCode user "${username}" not found.`);
+    const err = new Error(`No LeetCode account found for "${username}". Double-check the username.`);
     (err as Error & { code: string }).code = "USER_NOT_FOUND";
     throw err;
   }
 }
 
-export interface SolvedResult {
-  slugs:   Set<string>;
-  mode:    "full" | "limited";
-  warning?: string;
-}
-
 /**
- * Returns solved problem slugs, using the best available strategy.
- *
- * @param username   LeetCode username (for fallback query)
- * @param clientCreds  Optional creds from client request headers (highest priority)
+ * Returns full set of solved problem slugs for the authenticated session.
+ * Throws AUTH_REQUIRED if no credentials are provided.
+ * Throws AUTH_EXPIRED if credentials fail authentication.
  */
 export async function fetchSolvedSlugs(
-  username:    string,
+  username: string,
   clientCreds?: Creds
-): Promise<SolvedResult> {
+): Promise<Set<string>> {
   const creds = resolveCreds(clientCreds);
 
-  // ── Try authenticated fetch ─────────────────────────────────────────────
-  if (creds) {
-    try {
-      const slugs = await fetchAllSolvedAuth(creds);
-      if (slugs.size > 0) {
-        return { slugs, mode: "full" };
-      }
-      // 0 results with valid creds: session likely stale — fall through
-      console.warn("[tracker] Auth fetch returned 0 AC problems — session may be expired.");
-    } catch (err) {
-      const e = err as Error & { status?: number };
-      console.warn(`[tracker] Auth fetch failed (${e.status ?? e.message}) — falling back.`);
-    }
+  if (!creds) {
+    const err = new Error("LeetCode session cookies are required to fetch solved problems.");
+    (err as Error & { code: string }).code = "AUTH_REQUIRED";
+    throw err;
   }
 
-  // ── Fallback: recent submissions ────────────────────────────────────────
-  const slugs = await fetchRecentAcSlugs(username);
+  try {
+    const slugs = await fetchAllSolvedAuth(creds);
+    return slugs;
+  } catch (err: unknown) {
+    const e = err as Error & { code?: string };
+    if (e.code === "AUTH_EXPIRED") throw e;
 
-  const warning = creds
-    ? "Session cookies appear expired — showing recent solves only (~20). Update cookies via ⚙ config to restore full history."
-    : "No session cookies configured — showing recent solves only (~20). Add cookies via ⚙ config for full history.";
-
-  return { slugs, mode: "limited", warning };
+    const authErr = new Error("Session expired or invalid — please refresh your cookies in settings.");
+    (authErr as Error & { code: string }).code = "AUTH_EXPIRED";
+    throw authErr;
+  }
 }

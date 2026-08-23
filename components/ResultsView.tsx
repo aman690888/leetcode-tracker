@@ -9,86 +9,15 @@ import { useState } from "react";
 import { TrackResponse } from "@/types";
 import ProblemGroup from "./ProblemGroup";
 
-// ── Warning banner shown when running without auth cookies ─────────────────────
-function LimitedModeBanner({
-  message,
-  onOpenSettings,
-}: {
-  message: string;
-  onOpenSettings: () => void;
-}) {
-  const [dismissed, setDismissed] = useState(false);
-  if (dismissed) return null;
-  return (
-    <div style={{
-      padding:      "10px 14px",
-      marginBottom: "24px",
-      background:   "rgba(227, 179, 65, 0.07)",
-      border:       "1px solid rgba(227, 179, 65, 0.25)",
-      borderLeft:   "3px solid var(--amber)",
-      borderRadius: "4px",
-    }}>
-      <div style={{ display: "flex", alignItems: "flex-start", gap: "10px" }}>
-        <span style={{ color: "var(--amber)", fontSize: "13px", flexShrink: 0, marginTop: "1px" }}>⚠</span>
-        <span style={{
-          flex:       1,
-          fontFamily: "var(--font-mono)",
-          fontSize:   "12px",
-          color:      "var(--text-secondary)",
-          lineHeight: "1.6",
-        }}>
-          {message}
-        </span>
-        <button
-          onClick={() => setDismissed(true)}
-          aria-label="Dismiss warning"
-          style={{
-            background: "none",
-            border:     "none",
-            color:      "var(--text-muted)",
-            cursor:     "pointer",
-            fontSize:   "16px",
-            flexShrink: 0,
-            padding:    "0 2px",
-            lineHeight: 1,
-          }}
-        >
-          ×
-        </button>
-      </div>
-      {/* Inline CTA to open settings */}
-      <div style={{ marginTop: "6px", paddingLeft: "23px" }}>
-        <button
-          onClick={onOpenSettings}
-          style={{
-            background:    "none",
-            border:        "none",
-            padding:       0,
-            fontFamily:    "var(--font-mono)",
-            fontSize:      "11px",
-            color:         "var(--blue)",
-            cursor:        "pointer",
-            textDecoration: "underline",
-            textUnderlineOffset: "2px",
-          }}
-        >
-          ⚙ Add session cookies for full history →
-        </button>
-      </div>
-    </div>
-  );
-}
-
 interface Props {
   data: TrackResponse;
-  onOpenSettings: () => void;
 }
 
-export default function ResultsView({ data, onOpenSettings }: Props) {
+export default function ResultsView({ data }: Props) {
   const [showCompleted, setShowCompleted] = useState(false);
   const {
     totalSolved, totalAssigned, percentage, groups,
-    username, fetchedAt, solveMode, solveModeWarning,
+    username, fetchedAt,
   } = data;
 
   const pending     = totalAssigned - totalSolved;
@@ -105,10 +34,6 @@ export default function ResultsView({ data, onOpenSettings }: Props) {
 
   return (
     <div>
-      {/* ── Limited-mode warning banner ────────────────────────────────────── */}
-      {solveMode === "limited" && solveModeWarning && (
-        <LimitedModeBanner message={solveModeWarning} onOpenSettings={onOpenSettings} />
-      )}
       {/* ── Summary ───────────────────────────────────────────────────────── */}
       <section style={{ marginBottom: "32px" }}>
         {/* Stats row */}

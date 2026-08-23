@@ -2,11 +2,7 @@
  * app/api/track/route.ts
  * GET /api/track?username=<username>
  *
- * Credential priority (highest → lowest):
- *   1. x-leetcode-session / x-leetcode-csrf request headers (from client localStorage)
- *   2. LEETCODE_SESSION / LEETCODE_CSRF_TOKEN env vars (local dev fallback)
- *   3. No auth → recent-submissions fallback with warning
- *
+ * Requires authenticated LeetCode session cookies (from client request headers).
  * Client-supplied credentials are used for this request only.
  * They are NEVER logged, NEVER persisted server-side.
  */
@@ -31,7 +27,6 @@ export async function GET(
   }
 
   // Read client-supplied auth headers (localStorage → fetch headers on client)
-  // Values used for this request only — never logged, never written anywhere
   const clientSession = req.headers.get("x-leetcode-session")?.trim();
   const clientCsrf    = req.headers.get("x-leetcode-csrf")?.trim();
   const clientCreds: Creds | undefined =
@@ -71,19 +66,35 @@ export async function GET(
     );
   }
 
-  // 3. Fetch solved slugs — client creds take priority over env vars
-  let solvedResult: Awaited<ReturnType<typeof fetchSolvedSlugs>>;
+  // 3. Fetch solved slugs (strict auth)
+  let solvedSlugs: Set<string>;
   try {
-    solvedResult = await fetchSolvedSlugs(username, clientCreds);
+    solvedSlugs = await fetchSolvedSlugs(username, clientCreds);
   } catch (err: unknown) {
-    const e = err as Error;
+    const e = err as Error & { code?: string };
+    if (e.code === "AUTH_REQUIRED") {
+      return NextResponse.json(
+        {
+          error: "LeetCode session cookies are required to fetch solved problems.",
+          code: "AUTH_REQUIRED",
+        } satisfies TrackError,
+        { status: 401 }
+      );
+    }
+    if (e.code === "AUTH_EXPIRED") {
+      return NextResponse.json(
+        {
+          error: "Session expired or invalid — please refresh your cookies in settings.",
+          code: "AUTH_EXPIRED",
+        } satisfies TrackError,
+        { status: 401 }
+      );
+    }
     return NextResponse.json(
       { error: `Could not fetch submissions: ${e.message}`, code: "LEETCODE_FETCH_FAILED" } satisfies TrackError,
       { status: 502 }
     );
   }
-
-  const { slugs: solvedSlugs, mode: solveMode, warning: solveModeWarning } = solvedResult;
 
   // 4. Mark each problem solved / pending
   let totalAssigned = 0;
@@ -111,7 +122,5 @@ export async function GET(
     percentage,
     groups,
     fetchedAt: new Date().toISOString(),
-    solveMode,
-    ...(solveModeWarning ? { solveModeWarning } : {}),
   } satisfies TrackResponse);
 }
