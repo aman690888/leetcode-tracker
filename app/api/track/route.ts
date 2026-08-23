@@ -14,6 +14,38 @@ import { TrackError, TrackResponse } from "@/types";
 
 export const runtime = "nodejs";
 
+// ── TEMPORARY DEBUG HELPERS ────────────────────────────────────────────────────
+
+/**
+ * Normalizes a slug to a canonical form for comparison purposes.
+ * LeetCode API returns lowercase-hyphenated slugs — so does our parser,
+ * but edge cases (trailing slash, query params, whitespace, casing) can cause misses.
+ */
+function normalizeSlug(raw: string): string {
+  return raw
+    .toLowerCase()          // force lowercase
+    .trim()                 // strip surrounding whitespace
+    .replace(/\/$/, "")    // strip trailing slash
+    .replace(/\?.*$/, ""); // strip URL query params (e.g. ?envType=...)
+}
+
+/**
+ * Simple character-overlap similarity score between two strings (0–1).
+ * Not Levenshtein — fast enough for a debug check over small sets.
+ */
+function similarity(a: string, b: string): number {
+  if (a === b) return 1;
+  if (!a || !b) return 0;
+  const longer  = a.length >= b.length ? a : b;
+  const shorter = a.length < b.length  ? a : b;
+  let matches = 0;
+  for (let i = 0; i < shorter.length; i++) {
+    if (longer.includes(shorter[i])) matches++;
+  }
+  return matches / longer.length;
+}
+
+// ── Route handler ─────────────────────────────────────────────────────────────
 export async function GET(
   req: NextRequest
 ): Promise<NextResponse<TrackResponse | TrackError>> {
@@ -96,20 +128,77 @@ export async function GET(
     );
   }
 
-  // 4. Mark each problem solved / pending
+  // --- TEMPORARY DEBUG LOG: slug normalization analysis ---
+  // Build a normalized lookup map: normalizedSlug → original raw slug from LeetCode API
+  const solvedNormMap = new Map<string, string>();
+  for (const raw of solvedSlugs) {
+    solvedNormMap.set(normalizeSlug(raw), raw);
+  }
+  console.log(
+    `[DEBUG-MATCH] Solved slugs from LeetCode API: ${solvedSlugs.size} raw, ` +
+    `${solvedNormMap.size} normalized (diff=${solvedSlugs.size - solvedNormMap.size} collisions)`
+  );
+
+  // Collect all sheet slugs for comparison
+  const allSheetSlugs: { raw: string; normalized: string }[] = [];
+  for (const group of groups) {
+    for (const p of group.problems) {
+      allSheetSlugs.push({ raw: p.slug, normalized: normalizeSlug(p.slug) });
+    }
+  }
+  console.log("[DEBUG-MATCH] Sheet slugs (raw → normalized):", JSON.stringify(
+    allSheetSlugs.map((s) => ({ raw: s.raw, norm: s.normalized }))
+  ));
+
+  // 4. Mark each problem solved / pending — with debug diagnostics for misses
   let totalAssigned = 0;
   let totalSolved   = 0;
+
+  const solvedNormedSet = new Set(solvedNormMap.keys());
 
   for (const group of groups) {
     let solvedCount = 0;
     for (const p of group.problems) {
-      p.solved = solvedSlugs.has(p.slug);
+      const rawSlug    = p.slug;
+      const normSlug   = normalizeSlug(rawSlug);
+
+      // Try exact match first, then normalized match
+      const exactHit   = solvedSlugs.has(rawSlug);
+      const normHit    = solvedNormedSet.has(normSlug);
+      p.solved = exactHit || normHit;
+
+      // --- TEMPORARY DEBUG LOG: per-problem match trace ---
+      if (!p.solved) {
+        // Closest-match among solved slugs for near-miss detection
+        let bestScore = 0;
+        let bestMatch = "";
+        for (const s of solvedNormedSet) {
+          const score = similarity(normSlug, s);
+          if (score > bestScore) { bestScore = score; bestMatch = s; }
+        }
+
+        console.log(
+          `[DEBUG-MISS] "${rawSlug}" (norm: "${normSlug}") — ` +
+          `exactHit=${exactHit}, normHit=${normHit}, ` +
+          `closestMatch=${bestScore >= 0.9 ? `"${bestMatch}" (score=${bestScore.toFixed(2)})` : `none above 90% (best: "${bestMatch}" @ ${bestScore.toFixed(2)})`}`
+        );
+      } else if (!exactHit && normHit) {
+        // It only matched after normalization — this is the bug indicator
+        const rawFromApi = solvedNormMap.get(normSlug);
+        console.log(
+          `[DEBUG-NORMFIX] "${rawSlug}" matched via normalization only. ` +
+          `Raw from sheet: "${rawSlug}", raw from API: "${rawFromApi}", normalized: "${normSlug}"`
+        );
+      }
+
       if (p.solved) solvedCount++;
     }
     group.solvedCount = solvedCount;
     totalAssigned += group.problems.length;
     totalSolved   += solvedCount;
   }
+
+  console.log(`[DEBUG-MATCH] Final: ${totalSolved}/${totalAssigned} solved.`);
 
   const percentage = totalAssigned > 0
     ? Math.round((totalSolved / totalAssigned) * 100)

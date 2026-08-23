@@ -104,8 +104,13 @@ async function fetchAllSolvedAuth(creds: Creds): Promise<Set<string>> {
   const limit = 500;
   let   skip  = 0;
   let   total = Infinity;
+  let   page  = 0;
+
+  // --- TEMPORARY DEBUG LOG ---
+  console.log("[DEBUG-LC] Starting authenticated solved-slug fetch. limit-per-page:", limit);
 
   while (skip < total) {
+    page++;
     // eslint-disable-next-line no-await-in-loop
     const raw = (await gql(
       AC_PROBLEMS_AUTH_QUERY,
@@ -113,18 +118,36 @@ async function fetchAllSolvedAuth(creds: Creds): Promise<Set<string>> {
       authHeaders(creds)
     )) as { data?: { problemsetQuestionList?: AcPage } };
 
-    const page = raw?.data?.problemsetQuestionList;
-    if (!page) {
+    const pageData = raw?.data?.problemsetQuestionList;
+    if (!pageData) {
       const err = new Error("Session expired or invalid — please refresh your cookies in settings.");
       (err as Error & { code: string }).code = "AUTH_EXPIRED";
       throw err;
     }
 
-    total = page.total;
-    for (const q of page.questions) slugs.add(q.titleSlug);
+    // --- TEMPORARY DEBUG LOG ---
+    console.log(
+      `[DEBUG-LC] Page ${page}: skip=${skip}, API total=${pageData.total}, ` +
+      `returned=${pageData.questions.length}, collected so far=${slugs.size + pageData.questions.length}`
+    );
+
+    // Pagination correctness: update total on first page, assert it doesn't change
+    if (skip === 0) {
+      total = pageData.total;
+      console.log(`[DEBUG-LC] Declared total from API: ${total}`);
+    } else if (pageData.total !== total) {
+      // LeetCode total shifted mid-pagination (unlikely but log if it happens)
+      console.warn(`[DEBUG-LC] ⚠ total changed mid-pagination: was ${total}, now ${pageData.total}`);
+      total = pageData.total; // use updated value
+    }
+
+    for (const q of pageData.questions) slugs.add(q.titleSlug);
     skip += limit;
-    if (skip > total + limit) break;
   }
+
+  // --- TEMPORARY DEBUG LOG ---
+  console.log(`[DEBUG-LC] Pagination complete: ${page} page(s), ${slugs.size} unique solved slugs fetched.`);
+  console.log("[DEBUG-LC] All solved slugs (raw from API):", JSON.stringify([...slugs].sort()));
 
   return slugs;
 }
