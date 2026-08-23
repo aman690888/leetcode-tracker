@@ -101,7 +101,7 @@ function authHeaders(creds: Creds): Record<string, string> {
 // ── Authenticated full-history fetch ───────────────────────────────────────────
 async function fetchAllSolvedAuth(creds: Creds): Promise<Set<string>> {
   const slugs = new Set<string>();
-  const limit = 500;
+  const limit = 100; // LeetCode silently caps at 100 per page regardless of limit param
   let   skip  = 0;
   let   total = Infinity;
   let   page  = 0;
@@ -109,7 +109,9 @@ async function fetchAllSolvedAuth(creds: Creds): Promise<Set<string>> {
   // --- TEMPORARY DEBUG LOG ---
   console.log("[DEBUG-LC] Starting authenticated solved-slug fetch. limit-per-page:", limit);
 
-  while (skip < total) {
+  // Loop until we have collected all problems (compare slugs.size vs declared total,
+  // NOT skip vs total — the API may return fewer items per page than requested)
+  while (skip === 0 || slugs.size < total) {
     page++;
     // eslint-disable-next-line no-await-in-loop
     const raw = (await gql(
@@ -131,22 +133,28 @@ async function fetchAllSolvedAuth(creds: Creds): Promise<Set<string>> {
       `returned=${pageData.questions.length}, collected so far=${slugs.size + pageData.questions.length}`
     );
 
-    // Pagination correctness: update total on first page, assert it doesn't change
     if (skip === 0) {
       total = pageData.total;
       console.log(`[DEBUG-LC] Declared total from API: ${total}`);
     } else if (pageData.total !== total) {
-      // LeetCode total shifted mid-pagination (unlikely but log if it happens)
       console.warn(`[DEBUG-LC] ⚠ total changed mid-pagination: was ${total}, now ${pageData.total}`);
-      total = pageData.total; // use updated value
+      total = pageData.total;
     }
 
+    const sizeBefore = slugs.size;
     for (const q of pageData.questions) slugs.add(q.titleSlug);
+
+    // Safety: if a page returned 0 new results, stop to avoid infinite loop
+    if (slugs.size === sizeBefore) {
+      console.warn(`[DEBUG-LC] ⚠ Page ${page} returned 0 new slugs — stopping early to avoid infinite loop.`);
+      break;
+    }
+
     skip += limit;
   }
 
   // --- TEMPORARY DEBUG LOG ---
-  console.log(`[DEBUG-LC] Pagination complete: ${page} page(s), ${slugs.size} unique solved slugs fetched.`);
+  console.log(`[DEBUG-LC] Pagination complete: ${page} page(s), ${slugs.size}/${total} slugs fetched.`);
   console.log("[DEBUG-LC] All solved slugs (raw from API):", JSON.stringify([...slugs].sort()));
 
   return slugs;
