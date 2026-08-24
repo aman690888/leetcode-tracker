@@ -10,6 +10,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { fetchAssignments } from "@/lib/sheet";
 import { verifyUser, fetchSolvedSlugs, type Creds } from "@/lib/leetcode";
+import { logUsageEvent } from "@/lib/usage-logger";
 import { TrackError, TrackResponse } from "@/types";
 
 export const runtime = "nodejs";
@@ -199,6 +200,23 @@ export async function GET(
   }
 
   console.log(`[DEBUG-MATCH] Final: ${totalSolved}/${totalAssigned} solved.`);
+
+  // Fire-and-forget persistent usage logging with calculation result (never blocks response)
+  const ip =
+    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+    req.headers.get("x-real-ip")?.trim() ||
+    "unknown";
+  const userAgent = req.headers.get("user-agent")?.trim() || "unknown";
+
+  logUsageEvent({
+    username,
+    action: "fetch_progress",
+    result: `${totalSolved}/${totalAssigned}`,
+    ip,
+    userAgent,
+  }).catch((err) => {
+    console.error("[usage-logger] failed to record log:", err?.message || err);
+  });
 
   const percentage = totalAssigned > 0
     ? Math.round((totalSolved / totalAssigned) * 100)
