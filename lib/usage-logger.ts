@@ -28,6 +28,7 @@ export interface UsageLogRow {
 interface ServiceAccountCredentials {
   client_email: string;
   private_key: string;
+  raw_key_length?: number;
 }
 
 interface CachedToken {
@@ -38,6 +39,64 @@ interface CachedToken {
 let tokenCache: CachedToken | null = null;
 
 /**
+ * Normalizes and cleans a private key string from env vars or JSON files.
+ * Handles:
+ * - Stripping outer quotes (e.g. "..." or '...') if pasted with quotes
+ * - Converting literal '\n' sequences into actual newline characters
+ * - Normalizing \r\n to \n
+ * - Ensuring the key ends with a newline
+ */
+function formatPrivateKey(rawKey: string): string {
+  if (!rawKey) return "";
+  let key = rawKey.trim();
+  if (
+    (key.startsWith('"') && key.endsWith('"')) ||
+    (key.startsWith("'") && key.endsWith("'"))
+  ) {
+    key = key.slice(1, -1).trim();
+  }
+  key = key.replace(/\\n/g, "\n").replace(/\r/g, "");
+  if (!key.endsWith("\n")) {
+    key += "\n";
+  }
+  return key;
+}
+
+/**
+ * Formats an error and its nested cause for detailed JSON logging.
+ */
+function formatErrorDetails(err: unknown): Record<string, unknown> {
+  if (!err) return { error: String(err) };
+  if (err instanceof Error) {
+    const causeObj = (err as Error & { cause?: unknown }).cause;
+    let formattedCause: unknown = undefined;
+    if (causeObj instanceof Error) {
+      formattedCause = {
+        name: causeObj.name,
+        message: causeObj.message,
+        code: (causeObj as { code?: string }).code,
+        syscall: (causeObj as { syscall?: string }).syscall,
+        hostname: (causeObj as { hostname?: string }).hostname,
+        stack: causeObj.stack,
+      };
+    } else if (causeObj && typeof causeObj === "object") {
+      formattedCause = causeObj;
+    } else if (causeObj !== undefined) {
+      formattedCause = String(causeObj);
+    }
+
+    return {
+      name: err.name,
+      message: err.message,
+      code: (err as { code?: string }).code,
+      cause: formattedCause,
+      stack: err.stack,
+    };
+  }
+  return { error: String(err) };
+}
+
+/**
  * Resolves service account credentials from env vars or local service-account.json file.
  */
 function getCredentials(): ServiceAccountCredentials | null {
@@ -45,14 +104,15 @@ function getCredentials(): ServiceAccountCredentials | null {
   const email =
     process.env.GOOGLE_CLIENT_EMAIL?.trim() ||
     process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL?.trim();
-  const key =
+  const rawKey =
     process.env.GOOGLE_PRIVATE_KEY?.trim() ||
     process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY?.trim();
 
-  if (email && key) {
+  if (email && rawKey) {
     return {
       client_email: email,
-      private_key: key.replace(/\\n/g, "\n"),
+      private_key: formatPrivateKey(rawKey),
+      raw_key_length: rawKey.length,
     };
   }
 
@@ -69,7 +129,8 @@ function getCredentials(): ServiceAccountCredentials | null {
       if (parsed.client_email && parsed.private_key) {
         return {
           client_email: parsed.client_email,
-          private_key: parsed.private_key.replace(/\\n/g, "\n"),
+          private_key: formatPrivateKey(parsed.private_key),
+          raw_key_length: parsed.private_key.length,
         };
       }
     } catch {
@@ -87,7 +148,8 @@ function getCredentials(): ServiceAccountCredentials | null {
       if (parsed.client_email && parsed.private_key) {
         return {
           client_email: parsed.client_email,
-          private_key: parsed.private_key,
+          private_key: formatPrivateKey(parsed.private_key),
+          raw_key_length: parsed.private_key.length,
         };
       }
     } catch {
@@ -124,6 +186,22 @@ async function getAccessToken(): Promise<string> {
     );
   }
 
+  // ── Standalone Key Diagnostic Check ────────────────────────────────────────
+  const startsWithHeader = creds.private_key.startsWith("-----BEGIN PRIVATE KEY-----");
+  const endsWithFooter = creds.private_key.endsWith("-----END PRIVATE KEY-----\n");
+  const lineCount = creds.private_key.split("\n").length;
+
+  console.log(
+    `[usage-logger] Private Key Diagnostics:\n` +
+    `  - Email: ${creds.client_email}\n` +
+    `  - Raw length: ${creds.raw_key_length ?? "unknown"}\n` +
+    `  - Cleaned length: ${creds.private_key.length}\n` +
+    `  - Starts with '-----BEGIN PRIVATE KEY-----': ${startsWithHeader}\n` +
+    `  - Ends with '-----END PRIVATE KEY-----\\n': ${endsWithFooter}\n` +
+    `  - Total lines: ${lineCount}\n` +
+    `  - Key preview: "${creds.private_key.slice(0, 30).replace(/\n/g, "↵")}...${creds.private_key.slice(-30).replace(/\n/g, "↵")}"`
+  );
+
   const header = { alg: "RS256", typ: "JWT" };
   const claimSet = {
     iss: creds.client_email,
@@ -137,35 +215,54 @@ async function getAccessToken(): Promise<string> {
   const encodedClaim = base64url(JSON.stringify(claimSet));
   const signInput = `${encodedHeader}.${encodedClaim}`;
 
-  const signer = crypto.createSign("RSA-SHA256");
-  signer.update(signInput);
-  const signature = signer.sign(creds.private_key, "base64");
-  const encodedSignature = signature
-    .replace(/=/g, "")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_");
+  let jwt: string;
+  try {
+    const signer = crypto.createSign("RSA-SHA256");
+    signer.update(signInput);
+    const signature = signer.sign(creds.private_key, "base64");
+    const encodedSignature = signature
+      .replace(/=/g, "")
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_");
 
-  const jwt = `${signInput}.${encodedSignature}`;
+    jwt = `${signInput}.${encodedSignature}`;
+  } catch (signErr: unknown) {
+    console.error(
+      "[usage-logger] crypto.sign failed when signing JWT:",
+      formatErrorDetails(signErr)
+    );
+    throw signErr;
+  }
 
-  const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
-      assertion: jwt,
-    }),
-  });
+  let tokenRes: Response;
+  try {
+    tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+        assertion: jwt,
+      }),
+    });
+  } catch (fetchErr: unknown) {
+    console.error(
+      "[usage-logger] Network error during token exchange fetch:",
+      formatErrorDetails(fetchErr)
+    );
+    throw fetchErr;
+  }
 
-  const tokenJson = (await tokenRes.json()) as {
+  const tokenJson = (await tokenRes.json().catch(() => ({}))) as {
     access_token?: string;
     expires_in?: number;
     error?: string;
+    error_description?: string;
   };
 
   if (!tokenRes.ok || !tokenJson.access_token) {
-    throw new Error(
-      `Failed to obtain Google access token: ${tokenJson.error || tokenRes.statusText}`
-    );
+    const errMsg = tokenJson.error_description || tokenJson.error || tokenRes.statusText;
+    console.error(`[usage-logger] Google OAuth2 API error (HTTP ${tokenRes.status}):`, tokenJson);
+    throw new Error(`Failed to obtain Google access token: ${errMsg}`);
   }
 
   tokenCache = {
@@ -205,30 +302,15 @@ export async function logUsageEvent(params: {
     return;
   }
 
-  // ── Credential sanity check ────────────────────────────────────────────────
-  const creds = getCredentials();
-  if (!creds) {
-    console.error(
-      "[usage-logger] No service account credentials found. " +
-      "Set GOOGLE_CLIENT_EMAIL + GOOGLE_PRIVATE_KEY in Vercel env vars."
-    );
-    return;
-  }
-  // Log the first 40 chars of the private key so we can spot \n escaping issues
-  // without exposing the actual key.
-  const keyPreview = creds.private_key.slice(0, 40).replace(/\n/g, "↵");
-  console.log(
-    `[usage-logger] Credentials resolved. email=${creds.client_email} ` +
-    `key_preview="${keyPreview}..." key_length=${creds.private_key.length}`
-  );
-
   // ── Token acquisition ──────────────────────────────────────────────────────
   let accessToken: string;
   try {
     accessToken = await getAccessToken();
   } catch (tokenErr: unknown) {
-    const e = tokenErr as Error;
-    console.error("[usage-logger] FAILED to get OAuth2 access token:", e.message);
+    console.error(
+      "[usage-logger] FAILED to get OAuth2 access token:",
+      formatErrorDetails(tokenErr)
+    );
     return; // don't throw — fire-and-forget
   }
 
@@ -257,11 +339,9 @@ export async function logUsageEvent(params: {
       }),
     });
   } catch (networkErr: unknown) {
-    const e = networkErr as Error;
     console.error(
-      `[usage-logger] Network error calling Sheets API: ${e.message}`,
-      `\n  sheetId=${sheetId}`,
-      `\n  url=${appendUrl}`
+      `[usage-logger] Network error calling Sheets API:`,
+      formatErrorDetails(networkErr)
     );
     return;
   }
@@ -292,16 +372,30 @@ export async function getUsageLogs(): Promise<UsageLogRow[]> {
 
   const getUrl = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/UsageLogs!A2:F`;
 
-  const res = await fetch(getUrl, {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      Accept: "application/json",
-    },
-    cache: "no-store",
-  });
+  let res: Response;
+  try {
+    res = await fetch(getUrl, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: "application/json",
+      },
+      cache: "no-store",
+    });
+  } catch (networkErr: unknown) {
+    console.error(
+      `[usage-logger] Network error calling Sheets API (getUsageLogs):`,
+      formatErrorDetails(networkErr)
+    );
+    throw networkErr;
+  }
 
   if (!res.ok) {
-    const errText = await res.text();
+    const errText = await res.text().catch(() => "(could not read body)");
+    console.error(
+      `[usage-logger] Sheets API returned HTTP ${res.status} (getUsageLogs):`,
+      `\n  Body: ${errText}`,
+      `\n  sheetId=${sheetId}`
+    );
     throw new Error(`Sheets API fetch failed (${res.status}): ${errText}`);
   }
 
