@@ -189,7 +189,8 @@ export function getISTIsoTimestamp(): string {
 
 /**
  * Appends a usage log row to the "UsageLogs" tab in USAGE_LOG_SHEET_ID.
- * Intended to be called fire-and-forget.
+ * Intended to be called fire-and-forget (.catch() in caller).
+ * Full error chain is logged here so "fetch failed" never hides the real cause.
  */
 export async function logUsageEvent(params: {
   username: string;
@@ -200,10 +201,38 @@ export async function logUsageEvent(params: {
 }): Promise<void> {
   const sheetId = process.env.USAGE_LOG_SHEET_ID?.trim();
   if (!sheetId) {
-    // If not configured, silently skip
+    console.warn("[usage-logger] USAGE_LOG_SHEET_ID not set — skipping log.");
     return;
   }
 
+  // ── Credential sanity check ────────────────────────────────────────────────
+  const creds = getCredentials();
+  if (!creds) {
+    console.error(
+      "[usage-logger] No service account credentials found. " +
+      "Set GOOGLE_CLIENT_EMAIL + GOOGLE_PRIVATE_KEY in Vercel env vars."
+    );
+    return;
+  }
+  // Log the first 40 chars of the private key so we can spot \n escaping issues
+  // without exposing the actual key.
+  const keyPreview = creds.private_key.slice(0, 40).replace(/\n/g, "↵");
+  console.log(
+    `[usage-logger] Credentials resolved. email=${creds.client_email} ` +
+    `key_preview="${keyPreview}..." key_length=${creds.private_key.length}`
+  );
+
+  // ── Token acquisition ──────────────────────────────────────────────────────
+  let accessToken: string;
+  try {
+    accessToken = await getAccessToken();
+  } catch (tokenErr: unknown) {
+    const e = tokenErr as Error;
+    console.error("[usage-logger] FAILED to get OAuth2 access token:", e.message);
+    return; // don't throw — fire-and-forget
+  }
+
+  // ── Sheets API write ───────────────────────────────────────────────────────
   const timestamp = getISTIsoTimestamp();
   const username = params.username.trim();
   const action = params.action || "fetch_progress";
@@ -211,27 +240,43 @@ export async function logUsageEvent(params: {
   const ip = params.ip || "unknown";
   const userAgent = params.userAgent || "unknown";
 
-  const accessToken = await getAccessToken();
-
   const appendUrl =
     `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/` +
     `UsageLogs!A:F:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`;
 
-  const res = await fetch(appendUrl, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      values: [[timestamp, username, action, result, ip, userAgent]],
-    }),
-  });
+  let res: Response;
+  try {
+    res = await fetch(appendUrl, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        values: [[timestamp, username, action, result, ip, userAgent]],
+      }),
+    });
+  } catch (networkErr: unknown) {
+    const e = networkErr as Error;
+    console.error(
+      `[usage-logger] Network error calling Sheets API: ${e.message}`,
+      `\n  sheetId=${sheetId}`,
+      `\n  url=${appendUrl}`
+    );
+    return;
+  }
 
   if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`Sheets API append failed (${res.status}): ${errText}`);
+    const errText = await res.text().catch(() => "(could not read body)");
+    console.error(
+      `[usage-logger] Sheets API returned HTTP ${res.status}.`,
+      `\n  Body: ${errText}`,
+      `\n  sheetId=${sheetId}`
+    );
+    return;
   }
+
+  console.log(`[usage-logger] Logged: ${username} | ${action} | ${result}`);
 }
 
 /**

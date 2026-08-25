@@ -144,9 +144,35 @@ async function fetchAllSolvedAuth(creds: Creds): Promise<Set<string>> {
     const sizeBefore = slugs.size;
     for (const q of pageData.questions) slugs.add(q.titleSlug);
 
-    // Safety: if a page returned 0 new results, stop to avoid infinite loop
-    if (slugs.size === sizeBefore) {
-      console.warn(`[DEBUG-LC] ⚠ Page ${page} returned 0 new slugs — stopping early to avoid infinite loop.`);
+    const newSlugsThisPage = slugs.size - sizeBefore;
+
+    if (newSlugsThisPage === 0) {
+      if (page === 1 && total > 0) {
+        // API claims this account has solved problems (total > 0) but returned
+        // 0 items on page 1 — this is a real auth/session failure, not a
+        // genuine empty account. Surface it clearly instead of returning 0.
+        console.error(
+          `[DEBUG-LC] ✗ Page 1 returned 0 slugs but API declared total=${total}. ` +
+          `Likely expired session cookies — throwing AUTH_EXPIRED.`
+        );
+        const err = new Error(
+          "Session expired or invalid — please refresh your cookies in settings."
+        );
+        (err as Error & { code: string }).code = "AUTH_EXPIRED";
+        throw err;
+      }
+
+      // Two legitimate break cases:
+      //   (a) page === 1 && total === 0 → genuine new/empty account
+      //   (b) page > 1 → mid-pagination stall (rare, avoids infinite loop)
+      if (page === 1) {
+        console.log(`[DEBUG-LC] Account has 0 solved problems (new account or no AC submissions).`);
+      } else {
+        console.warn(
+          `[DEBUG-LC] ⚠ Page ${page} returned 0 new slugs (mid-pagination stall) — ` +
+          `stopping. Collected ${slugs.size}/${total}.`
+        );
+      }
       break;
     }
 
