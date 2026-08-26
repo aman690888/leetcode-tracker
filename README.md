@@ -1,76 +1,83 @@
-# tracker.sh
+# tracker.sh — DSA Assignment Tracker
 
 **Tracks which LeetCode problems assigned in class you've actually solved.**
 
-Pulls the live assignment sheet straight from Google Sheets, cross-references it against your authenticated LeetCode submission history, and shows an accurate breakdown of what's done and what's still pending — grouped by date, with a progress bar.
+Pulls the live curriculum straight from Google Sheets, cross-references it against your authenticated LeetCode submission history, and renders a sleek, real-time dashboard featuring an interactive **Quest Matrix**, **Total Mastery analytics**, and **isolated milestone problem feeds**.
 
-🔗 **Live: [aman-lctracker.vercel.app](https://aman-lctracker.vercel.app)**
+🔗 **Live Deployment: [aman-lctracker.vercel.app](https://aman-lctracker.vercel.app)**
 
 ---
 
 ## 👤 Author & Open Source
 
-Created by **[Aman Rawat](https://github.com/aman690888)**.
+Created with passion by **[Aman Rawat](https://github.com/aman690888)**.
 
 This is an open-source personal project designed to simplify DSA homework tracking. Contributions, issues, and forks are welcome under the [MIT License](LICENSE).
 
 ---
 
-## Getting Started (2-Step Guide)
+## ✨ Features & Architecture
 
-To ensure **100% accurate results** across your entire homework history, the tracker requires connecting your LeetCode session cookies.
+- 🌌 **KokonutUI Celestial Beams Canvas:** Smooth, GPU-accelerated drifting celestial light beams background with automatic lifecycle management and visibility throttling.
+- ✨ **ReactBits Laser Border Glow:** Interactive mouse-following perimeter border illumination with zero-overhead CSS custom property tracking.
+- 💎 **Refined Glassmorphism Cards:** Frosted dark glass containers (`backdrop-filter: blur(24px) saturate(180%)`) with luminous depth and hairline borders.
+- 🗺️ **Interactive Quest Matrix:** Visual heatmap grid representing every problem in the curriculum with instant hover preview tooltips, difficulty indicators, and direct LeetCode links.
+- 🔒 **Viewport-Locked Isolated Feed:** Two-column split layout where the header, search controls, and sticky stats stay locked in place while the milestone problem feed scrolls independently.
+- 🔍 **itshover.com Magnifier Icon:** Pure vector SVG search icon featuring physics-inspired wobble micro-interactions.
+- ⚡ **Real-Time Search & Tab Filtering:** Instant text search across problem titles, IDs, and tags, with quick toggling between "Pending" and "All" problems.
+- ⏱️ **Device-Only Recent Students History:** Privacy-first, local-device handle memory with 1-click handle switching and quick dismissal.
+- 🔐 **Zero-Knowledge Session Persistence:** Client-side only `localStorage` session cookie caching for private LeetCode GraphQL authentication.
+
+---
+
+## 🚀 Getting Started (2-Step Guide)
+
+To ensure **100% accurate results** across your entire homework history, the tracker connects to your LeetCode session cookies.
 
 ### Step 1: Connect Session Cookies (1-Minute Setup)
 
-Cookies are saved **strictly in your own browser** (`localStorage`) and never stored on any server.
+Cookies are saved **strictly in your own browser** (`localStorage`) and never stored on any external server.
 
 1. Open [leetcode.com](https://leetcode.com) in your browser (logged in).
 2. Press **F12** to open DevTools.
-3. Go to the **Application** tab (Chrome/Edge) or **Storage** tab (Firefox).
+3. Go to the **Application** tab (Chrome/Edge/Brave) or **Storage** tab (Firefox).
 4. In the left sidebar: **Storage → Cookies → `https://leetcode.com`**.
 5. Copy the value of **`LEETCODE_SESSION`** (long string starting with `eyJ...`).
 6. Copy the value of **`csrftoken`** (~64 characters).
-7. On [aman-lctracker.vercel.app](https://aman-lctracker.vercel.app), click **⚙ Configure Session Cookies →** (or the **⚙ config** button in the header), paste both values, and click **save**.
+7. On [aman-lctracker.vercel.app](https://aman-lctracker.vercel.app), click the **Session Status** button in the header, paste both values, and click **Save**.
 
-The `⚙ config` button will show a green dot (`⚙ session ●`) indicating your browser is ready.
+The button will show a green dot (`● Session Connected`) indicating your browser is ready.
 
 ---
 
 ### Step 2: Track Your Assignments
 
-1. Enter your LeetCode username in the terminal input.
-2. Click **run →**.
-3. Your full assignment breakdown will appear with live solved status.
+1. Enter your LeetCode username in the search input (or click a recently searched handle).
+2. Click **Track →** (or press `Enter`).
+3. Your full assignment breakdown will load instantly with live solved status and progress analytics.
 
 ---
 
-## Reading the Results
+## 🗺️ Reading the Dashboard
 
-At the top you'll see four numbers:
+### 1. Left Sticky Column
+- **Total Mastery Card:** Displays your overall completion percentage, circular progress ring, and counts of solved, assigned, and pending problems.
+- **Quest Matrix Card:** Interactive matrix grid of all assigned problems in the curriculum. Green squares indicate solved problems, amber squares indicate pending problems.
 
-- **solved** — how many assigned problems you've AC'd on LeetCode
-- **assigned** — total problems in the sheet
-- **pending** — what's left (`assigned − solved`)
-- **complete %** — progress bar fills green when done, amber when not
-
-Below that, problems are grouped by date. Each group shows:
-- A **left border**: amber if anything is still pending in that group, green if it's all done
-- Each problem row: a **green dot** (solved) or grey dot (pending), the problem title, its LC number, and an arrow link that opens the problem on LeetCode in a new tab
-- Solved problems get a strikethrough
-
-By default you see **pending problems only**. Hit **"show completed"** (top-right of the results) to see everything.
-
-The **↺ refresh** button in the header re-runs the check without re-entering your username. The URL also updates to `?user=yourusername` so you can bookmark it.
+### 2. Right Milestone Feed
+- **Filter Controls:** Live search bar and "Pending" / "All" toggle tabs to quickly focus on remaining tasks.
+- **Day Cards:** Curriculum assignments grouped by day/milestone with status badges, difficulty chips, and direct links to LeetCode.
+- **Compact Problem Rows:** One-click problem titles that open the corresponding LeetCode question in a new tab.
 
 ---
 
-## How It Works
+## 🛠️ How It Works
 
 ```
 Google Sheets API v4
       │
-      ▼  (Cached 3 mins in server RAM + Next.js Data Cache)
-  Parse assignments
+      ▼  (Cached 3 mins in server memory + Next.js Data Cache)
+  Parse curriculum sheet
   (dynamic column detection, extracts title + LC slug + URL)
       │
       ▼  LeetCode GraphQL API (Authenticated)
@@ -78,53 +85,38 @@ Google Sheets API v4
   (uses student's private session cookies from localStorage)
       │
       ▼
-  Match assignment slugs vs solved slugs
+  Cross-reference assignment slugs vs solved slugs
       │
       ▼
-  Return grouped results → render in UI
+  Return unified telemetry → Render modern glassmorphic dashboard
 ```
 
-### Scaling & Caching
-To comfortably support multiple students checking assignments simultaneously without hitting Google Sheets API rate limits:
-- **Two-Tier 3-Minute Cache**: Assignment sheet data is cached in server memory and Next.js Data Cache for 3 minutes. Concurrently visiting students share the cached sheet instantly (0ms latency, zero extra API calls).
-- **Graceful Rate-Limit Fallback**: If Google Sheets API ever encounters temporary rate limits, the server automatically serves the cached sheet seamlessly.
+---
+
+## 📦 Tech Stack
+
+- **Framework:** Next.js 16 (App Router, Turbopack, TypeScript)
+- **Styling & Effects:** Tailwind CSS v4, ReactBits BorderGlow, KokonutUI Canvas Beams
+- **APIs:** Google Sheets API v4 (Two-tier cached), LeetCode GraphQL API
+- **Client Storage:** Browser `localStorage` for private cookie and recent user management
+- **Deployment:** Vercel Serverless Platform
 
 ---
 
-## Tech Stack
+## ⚙️ Environment Variables
 
-- **Next.js 16** (App Router, TypeScript)
-- **Tailwind CSS v4** for styling
-- **Google Sheets API v4** for reading assignments with two-tier caching
-- **LeetCode GraphQL API** (Authenticated) for full solved history
-- **Browser localStorage** for client-side session cookie persistence
-- **Vercel** for serverless hosting
-
----
-
-## Environment Variables
-
-Configured in Vercel's project settings (**Settings → Environment Variables**):
+Configured in Vercel project settings or `.env.local`:
 
 | Variable | Required | What it is |
 |---|---|---|
-| `GOOGLE_SHEETS_API_KEY` | ✅ | Google Cloud API key restricted to Sheets API. |
+| `GOOGLE_SHEETS_API_KEY` | ✅ | Google Cloud API key with access to Sheets API. |
 | `SHEET_ID` | ✅ | Spreadsheet ID from the Google Sheet URL. |
 | `SHEET_RANGE` | ✅ | Sheet tab name or range (e.g. `Sheet1` or `Sheet1!A:E`). |
-| `LEETCODE_SESSION` | Optional | Server-side fallback session cookie (local dev only). |
-| `LEETCODE_CSRF_TOKEN` | Optional | Server-side fallback CSRF token (local dev only). |
+| `LEETCODE_SESSION` | Optional | Fallback session cookie for local development. |
+| `LEETCODE_CSRF_TOKEN` | Optional | Fallback CSRF token for local development. |
 
 ---
 
-## Troubleshooting
+## 📄 License
 
-**"Session expired or invalid" error**
-LeetCode session cookies expire every 1–3 weeks. Click the **⚙ Refresh Session Cookies →** button in the error box to paste fresh cookies from DevTools.
-
-**"Assigned: 0 / Solved: 0 / 0%" with no error message**
-1. Check that `GOOGLE_SHEETS_API_KEY`, `SHEET_ID`, and `SHEET_RANGE` are set in Vercel.
-2. If you just edited env vars, trigger a **Redeploy** in Vercel.
-3. Verify that `SHEET_RANGE` matches the actual tab name at the bottom of the Google Sheet.
-
-**"No LeetCode account found for X" error**
-Check spelling and capitalization — LeetCode usernames are case-sensitive.
+Distributed under the [MIT License](LICENSE).

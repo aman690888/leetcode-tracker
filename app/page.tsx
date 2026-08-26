@@ -1,92 +1,82 @@
 "use client";
 
-/**
- * app/page.tsx
- * Main page — client component.
- * Syncs username to URL query param (?user=...) for shareability.
- * Requires LeetCode session cookies in localStorage before allowing queries.
- */
-
-import { useCallback, useEffect, useRef, useState } from "react";
+import BorderGlow from "@/components/BorderGlow";
+import { useCallback, useEffect, useState, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Suspense } from "react";
 import { TrackError, TrackResponse } from "@/types";
+import { loadCreds, type StoredCreds } from "@/components/SettingsPanel";
+import BeamsBackground from "@/components/BeamsBackground";
+import ShimmerButton from "@/components/ShimmerButton";
+import AnimatedSettingsModal from "@/components/AnimatedSettingsModal";
 import ResultsView from "@/components/ResultsView";
-import SettingsPanel, {
-  loadCreds,
-  type StoredCreds,
-} from "@/components/SettingsPanel";
+import RecentUsersPills, { saveRecentUser } from "@/components/RecentUsersPills";
+import RocketIcon from "@/components/RocketIcon";
+import MagnifierIcon from "@/components/MagnifierIcon";
 
-// ── Inner component (needs useSearchParams inside Suspense) ───────────────────
-function TrackerInner() {
-  const router       = useRouter();
+function MainTrackerInner() {
+  const router = useRouter();
   const searchParams = useSearchParams();
 
-  const initialUser  = searchParams.get("user") ?? "";
-  const [username,      setUsername]      = useState(initialUser);
-  const [inputVal,      setInputVal]      = useState(initialUser);
-  const [loading,       setLoading]       = useState(false);
-  const [data,          setData]          = useState<TrackResponse | null>(null);
-  const [error,         setError]         = useState<string | null>(null);
-  const [isAuthError,   setIsAuthError]   = useState(false);
-  const [settingsOpen,  setSettingsOpen]  = useState(false);
-  const [creds,         setCreds]         = useState<StoredCreds | null>(null);
-  const [hydrated,      setHydrated]      = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const initialUser = searchParams.get("user") ?? "";
+  const [username, setUsername] = useState(initialUser);
+  const [inputVal, setInputVal] = useState(initialUser);
+  const [loading, setLoading] = useState(false);
+  const [data, setData] = useState<TrackResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [isAuthError, setIsAuthError] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [creds, setCreds] = useState<StoredCreds | null>(null);
 
-  // Load saved creds from localStorage on mount
   useEffect(() => {
     const saved = loadCreds();
     setCreds(saved);
-    setHydrated(true);
   }, []);
 
-  const runTrack = useCallback(async (user: string, currentCreds: StoredCreds | null) => {
-    const trimmed = user.trim();
-    if (!trimmed) return;
+  const runTrack = useCallback(
+    async (user: string, currentCreds: StoredCreds | null) => {
+      const trimmed = user.trim();
+      if (!trimmed) return;
 
-    if (!currentCreds?.session || !currentCreds?.csrf) {
-      setSettingsOpen(true);
-      return;
-    }
-
-    setLoading(true);
-    setError(null);
-    setIsAuthError(false);
-    setData(null);
-
-    // Sync username to URL
-    const params = new URLSearchParams(searchParams.toString());
-    params.set("user", trimmed);
-    router.replace(`?${params.toString()}`, { scroll: false });
-
-    // Build request headers from localStorage
-    const headers: Record<string, string> = {
-      "x-leetcode-session": currentCreds.session,
-      "x-leetcode-csrf":    currentCreds.csrf,
-    };
-
-    try {
-      const res  = await fetch(`/api/track?username=${encodeURIComponent(trimmed)}`, { headers });
-      const json = await res.json();
-      if (!res.ok) {
-        const errJson = json as TrackError;
-        setError(errJson.error ?? "Something went wrong.");
-        if (errJson.code === "AUTH_EXPIRED" || errJson.code === "AUTH_REQUIRED") {
-          setIsAuthError(true);
-        }
-      } else {
-        setData(json as TrackResponse);
-        setUsername(trimmed);
+      if (!currentCreds?.session || !currentCreds?.csrf) {
+        setSettingsOpen(true);
+        return;
       }
-    } catch {
-      setError("Network error — could not reach the server.");
-    } finally {
-      setLoading(false);
-    }
-  }, [router, searchParams]);
 
-  // Auto-run on load if user param in URL AND creds exist
+      setLoading(true);
+      setError(null);
+      setIsAuthError(false);
+
+      router.replace(`?user=${encodeURIComponent(trimmed)}`, { scroll: false });
+      saveRecentUser(trimmed);
+
+      const headers: Record<string, string> = {
+        "x-leetcode-session": currentCreds.session,
+        "x-leetcode-csrf": currentCreds.csrf,
+      };
+
+      try {
+        const res = await fetch(`/api/track?username=${encodeURIComponent(trimmed)}`, { headers });
+        const json = await res.json();
+        if (!res.ok) {
+          const errJson = json as TrackError;
+          setError(errJson.error ?? "Failed to fetch student progress.");
+          if (errJson.code === "AUTH_EXPIRED" || errJson.code === "AUTH_REQUIRED") {
+            setIsAuthError(true);
+          }
+        } else {
+          setData(json as TrackResponse);
+          setUsername(trimmed);
+          setInputVal(trimmed);
+        }
+      } catch {
+        setError("Network error — could not reach the server.");
+      } finally {
+        setLoading(false);
+      }
+    },
+    [router]
+  );
+
   useEffect(() => {
     if (initialUser) {
       const saved = loadCreds();
@@ -95,12 +85,16 @@ function TrackerInner() {
         runTrack(initialUser, saved);
       }
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     runTrack(inputVal, creds);
+  }
+
+  function handleSelectRecent(selectedUser: string) {
+    setInputVal(selectedUser);
+    runTrack(selectedUser, creds);
   }
 
   function handleCredsChange(newCreds: StoredCreds | null) {
@@ -111,385 +105,336 @@ function TrackerInner() {
   }
 
   const hasCreds = Boolean(creds?.session && creds?.csrf);
+  const hasResults = Boolean(data && !loading);
 
   return (
-    <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column" }}>
-      {/* ── Header ─────────────────────────────────────────────────────────── */}
-      <header style={{
-        borderBottom:   "1px solid var(--border)",
-        padding:        "12px 24px",
-        display:        "flex",
-        alignItems:     "center",
-        justifyContent: "space-between",
-        gap:            "16px",
-      }}>
-        <span style={{
-          fontFamily:    "var(--font-mono)",
-          fontSize:      "13px",
-          color:         "var(--text-muted)",
-          letterSpacing: "0.02em",
-        }}>
-          <span style={{ color: "var(--green)" }}>~/</span>tracker.sh
-        </span>
+    <div
+      style={{
+        height: "100vh",
+        maxHeight: "100vh",
+        overflow: "hidden",
+        backgroundColor: "#030712",
+        color: "#f8fafc",
+        fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
+        display: "flex",
+        flexDirection: "column",
+        position: "relative",
+      }}
+    >
+      {/* ── Beams Background ──────────────────────────────────────────────── */}
+      <BeamsBackground />
 
-        <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
-          {data && !loading && (
-            <button
-              onClick={() => runTrack(username, creds)}
-              disabled={loading}
-              style={{
-                fontFamily: "var(--font-mono)",
-                fontSize:   "12px",
-                color:      "var(--blue)",
-                background: "none",
-                border:     "none",
-                cursor:     "pointer",
-                padding:    "4px 0",
-                transition: "color 0.15s",
-              }}
-            >
-              ↺ refresh
-            </button>
-          )}
-
-          {/* Settings gear */}
-          <button
-            onClick={() => setSettingsOpen(true)}
-            title="Session config"
+      {/* ── Top Navigation Bar ────────────────────────────────────────────── */}
+      <header
+        style={{
+          flexShrink: 0,
+          zIndex: 40,
+          backgroundColor: "rgba(3, 7, 18, 0.85)",
+          backdropFilter: "blur(20px)",
+          WebkitBackdropFilter: "blur(20px)",
+          borderBottom: "1px solid rgba(255, 255, 255, 0.08)",
+          padding: "10px 24px",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: "16px",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+          <div
             style={{
-              fontFamily: "var(--font-mono)",
-              fontSize:   "12px",
-              color:      hasCreds ? "var(--green)" : "var(--amber)",
-              background: "none",
-              border:     "none",
-              cursor:     "pointer",
-              padding:    "4px 0",
-              transition: "color 0.15s",
-              display:    "flex",
+              width: "28px",
+              height: "28px",
+              borderRadius: "7px",
+              background: "rgba(255, 255, 255, 0.08)",
+              border: "1px solid rgba(255, 255, 255, 0.12)",
+              display: "flex",
               alignItems: "center",
-              gap:        "5px",
-            }}
-            onMouseEnter={(e) => {
-              (e.currentTarget as HTMLButtonElement).style.color = "var(--text-primary)";
-            }}
-            onMouseLeave={(e) => {
-              (e.currentTarget as HTMLButtonElement).style.color = hasCreds ? "var(--green)" : "var(--amber)";
+              justifyContent: "center",
+              fontSize: "14px",
             }}
           >
-            ⚙{" "}
-            <span style={{ fontSize: "11px" }}>
-              {hasCreds ? "session ●" : "config !"}
-            </span>
-          </button>
+            ⚡
+          </div>
+          <div>
+            <div style={{ fontSize: "13px", fontWeight: 700, letterSpacing: "-0.01em", color: "#f8fafc" }}>
+              DSA ASSIGNMENT TRACKER
+            </div>
+            <div style={{ fontSize: "10.5px", color: "#94a3b8" }}>
+              Live LeetCode & Google Sheets Telemetry
+            </div>
+          </div>
         </div>
+
+        <button
+          onClick={() => setSettingsOpen(true)}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "6px",
+            padding: "5px 12px",
+            backgroundColor: hasCreds ? "rgba(16, 185, 129, 0.1)" : "rgba(245, 158, 11, 0.1)",
+            border: hasCreds ? "1px solid rgba(16, 185, 129, 0.25)" : "1px solid rgba(245, 158, 11, 0.25)",
+            borderRadius: "6px",
+            color: hasCreds ? "#10b981" : "#f59e0b",
+            fontSize: "11.5px",
+            fontWeight: 600,
+            cursor: "pointer",
+            transition: "all 0.15s ease",
+          }}
+        >
+          <span style={{ fontSize: "10px" }}>{hasCreds ? "●" : "○"}</span>
+          {hasCreds ? "Session Connected" : "Connect Session"}
+        </button>
       </header>
 
-      {/* ── Main content ────────────────────────────────────────────────────── */}
-      <main style={{
-        flex:      1,
-        maxWidth:  "760px",
-        width:     "100%",
-        margin:    "0 auto",
-        padding:   "40px 24px 80px",
-      }}>
-
-        {/* ── Header Title ─────────────────────────────────────────────────── */}
-        {!data && !loading && !error && (
-          <div style={{ marginBottom: "28px" }}>
-            <h1 style={{
-              fontSize:      "22px",
-              fontWeight:    600,
-              color:         "var(--text-primary)",
-              marginBottom:  "6px",
-              letterSpacing: "-0.01em",
-            }}>
-              DSA Assignment Tracker
-            </h1>
-            <p style={{ color: "var(--text-secondary)", fontSize: "14px" }}>
-              Track assigned class problems against your full LeetCode solved history.
-            </p>
-          </div>
-        )}
-
-        {/* ── State 1: Setup required card when no cookies configured ──────── */}
-        {hydrated && !hasCreds && (
-          <section style={{
-            background:   "var(--bg-surface)",
-            border:       "1px solid var(--border)",
-            borderLeft:   "3px solid var(--amber)",
-            borderRadius: "6px",
-            padding:      "24px",
-            marginBottom: "32px",
-          }}>
-            <div style={{
-              display:       "flex",
-              alignItems:    "center",
-              gap:           "8px",
-              fontFamily:    "var(--font-mono)",
-              fontSize:      "12px",
-              color:         "var(--amber)",
-              marginBottom:  "12px",
-              textTransform: "uppercase",
-              letterSpacing: "0.05em",
-            }}>
-              <span>$ auth required</span>
-            </div>
-
-            <h2 style={{
-              fontSize:     "16px",
-              fontWeight:   600,
-              color:        "var(--text-primary)",
-              marginBottom: "8px",
-            }}>
-              LeetCode session setup required
-            </h2>
-
-            <p style={{
-              fontSize:     "13px",
-              color:        "var(--text-secondary)",
-              lineHeight:   "1.6",
-              marginBottom: "20px",
-            }}>
-              To accurately track your complete solve history across all assignments,
-              connect your LeetCode session cookies. This takes 1 minute and is stored
-              only in your own browser.
-            </p>
-
-            <button
-              onClick={() => setSettingsOpen(true)}
+      {/* ── Main Dynamic Stage (Locked to Viewport Height) ─────────────────── */}
+      <main
+        style={{
+          width: "100%",
+          maxWidth: hasResults ? "1140px" : "600px",
+          margin: "0 auto",
+          padding: hasResults ? "16px 20px 16px 20px" : "0 20px",
+          position: "relative",
+          zIndex: 10,
+          flex: 1,
+          minHeight: 0,
+          display: "flex",
+          flexDirection: "column",
+          justifyContent: hasResults ? "flex-start" : "center",
+          overflow: "hidden",
+          transition: "max-width 0.4s cubic-bezier(0.16, 1, 0.3, 1), padding 0.4s cubic-bezier(0.16, 1, 0.3, 1)",
+        }}
+      >
+        {/* Centered Hero Stage (Visible when no data loaded) */}
+        {!hasResults && !loading && (
+          <div
+            style={{
+              textAlign: "center",
+              marginBottom: "28px",
+              animation: "fadeIn 0.5s ease",
+            }}
+          >
+            <div
               style={{
-                background:   "var(--green)",
-                color:        "#0d1117",
-                border:       "none",
-                borderRadius: "4px",
-                fontWeight:   600,
-                fontSize:     "13px",
-                fontFamily:   "var(--font-mono)",
-                padding:      "10px 20px",
-                cursor:       "pointer",
-                display:      "inline-flex",
-                alignItems:   "center",
-                gap:          "8px",
-                transition:   "opacity 0.15s",
+                width: "44px",
+                height: "44px",
+                borderRadius: "12px",
+                background: "rgba(255, 255, 255, 0.08)",
+                border: "1px solid rgba(255, 255, 255, 0.12)",
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                fontSize: "22px",
+                marginBottom: "14px",
+                boxShadow: "0 0 24px rgba(255, 255, 255, 0.1)",
               }}
-              onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.opacity = "0.9"; }}
-              onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.opacity = "1"; }}
             >
-              ⚙ Configure Session Cookies →
-            </button>
-
-            <div style={{
-              marginTop:  "16px",
-              fontSize:   "11px",
-              fontFamily: "var(--font-mono)",
-              color:      "var(--text-muted)",
-            }}>
-              ⏱ 1-min setup · 🔒 Stored in browser localStorage only · 🔄 No password needed
+              ⚡
             </div>
-          </section>
-        )}
-
-        {/* ── State 2: Search form (unlocked when cookies configured) ───────── */}
-        {hasCreds && (
-          <section style={{ marginBottom: data || error ? "40px" : "0" }}>
-            <form onSubmit={handleSubmit}>
-              <div style={{
-                display:      "flex",
-                alignItems:   "center",
-                border:       "1px solid var(--border)",
-                borderRadius: "6px",
-                background:   "var(--bg-surface)",
-                overflow:     "hidden",
-              }}>
-                {/* Terminal prompt prefix */}
-                <span style={{
-                  fontFamily:  "var(--font-mono)",
-                  fontSize:    "13px",
-                  color:       "var(--text-muted)",
-                  padding:     "0 12px",
-                  borderRight: "1px solid var(--border)",
-                  whiteSpace:  "nowrap",
-                  userSelect:  "none",
-                  lineHeight:  "42px",
-                }}>
-                  $ user
-                </span>
-
-                <input
-                  ref={inputRef}
-                  type="text"
-                  value={inputVal}
-                  onChange={(e) => setInputVal(e.target.value)}
-                  placeholder="your-leetcode-username"
-                  autoComplete="off"
-                  autoCapitalize="none"
-                  spellCheck={false}
-                  style={{
-                    flex:       1,
-                    background: "transparent",
-                    border:     "none",
-                    outline:    "none",
-                    color:      "var(--text-primary)",
-                    fontFamily: "var(--font-mono)",
-                    fontSize:   "13px",
-                    padding:    "0 14px",
-                    height:     "42px",
-                    minWidth:   0,
-                  }}
-                />
-
-                <button
-                  type="submit"
-                  disabled={loading || !inputVal.trim()}
-                  style={{
-                    height:     "42px",
-                    padding:    "0 18px",
-                    background: loading ? "var(--bg-elevated)" : "var(--green)",
-                    color:      loading ? "var(--text-muted)" : "#0d1117",
-                    border:     "none",
-                    fontWeight: 600,
-                    fontSize:   "13px",
-                    cursor:     loading || !inputVal.trim() ? "default" : "pointer",
-                    transition: "background 0.15s",
-                    whiteSpace: "nowrap",
-                    flexShrink: 0,
-                  }}
-                >
-                  {loading ? "running..." : "run →"}
-                </button>
-              </div>
-            </form>
-          </section>
-        )}
-
-        {/* ── Loading ───────────────────────────────────────────────────────── */}
-        {loading && (
-          <div style={{
-            color:      "var(--text-secondary)",
-            fontFamily: "var(--font-mono)",
-            fontSize:   "13px",
-            display:    "flex",
-            alignItems: "center",
-            gap:        "8px",
-          }}>
-            <Blink />fetching sheet &amp; LeetCode data...
+            <h1
+              style={{
+                fontSize: "28px",
+                fontWeight: 800,
+                letterSpacing: "-0.03em",
+                color: "#ffffff",
+                margin: "0 0 8px 0",
+              }}
+            >
+              Track DSA Assignments
+            </h1>
+            <p
+              style={{
+                fontSize: "14px",
+                color: "#94a3b8",
+                margin: 0,
+                maxWidth: "440px",
+                marginInline: "auto",
+                lineHeight: 1.5,
+              }}
+            >
+              Search any student handle to load the interactive problem matrix, pending tasks, and curriculum progress.
+            </p>
           </div>
         )}
 
-        {/* ── Error / Auth Expired State ────────────────────────────────────── */}
-        {error && !loading && (
-          <div style={{
-            padding:      "16px",
-            background:   isAuthError ? "rgba(227, 179, 65, 0.08)" : "rgba(248, 81, 73, 0.08)",
-            border:       `1px solid ${isAuthError ? "rgba(227, 179, 65, 0.3)" : "rgba(248, 81, 73, 0.3)"}`,
-            borderLeft:   `3px solid ${isAuthError ? "var(--amber)" : "var(--red)"}`,
-            borderRadius: "6px",
-            marginBottom: "24px",
-          }}>
-            <div style={{
-              fontFamily:   "var(--font-mono)",
-              fontSize:     "13px",
-              color:        isAuthError ? "var(--amber)" : "var(--red)",
-              marginBottom: isAuthError ? "12px" : "0",
-            }}>
-              <span style={{ opacity: 0.7 }}>error: </span>{error}
-            </div>
+        {/* Search Bar Container (Static Header on top) */}
+        <div
+          style={{
+            marginBottom: hasResults ? "12px" : "28px",
+            width: "100%",
+            flexShrink: 0,
+            transition: "all 0.4s cubic-bezier(0.16, 1, 0.3, 1)",
+          }}
+        >
+          <form onSubmit={handleSubmit} style={{ display: "flex", gap: "8px" }}>
+            <BorderGlow borderRadius="10px" glowColor="rgba(56, 189, 248, 0.75)" glowRadius={160} style={{ position: "relative", flex: 1 }}>
+              <input
+                type="text"
+                value={inputVal}
+                onChange={(e) => setInputVal(e.target.value)}
+                placeholder="Enter LeetCode username..."
+                disabled={loading}
+                style={{
+                  width: "100%",
+                  height: "42px",
+                  padding: "0 16px 0 40px",
+                  backgroundColor: "rgba(10, 14, 28, 0.45)",
+                  backdropFilter: "blur(24px) saturate(180%)",
+                  WebkitBackdropFilter: "blur(24px) saturate(180%)",
+                  border: "1px solid rgba(255, 255, 255, 0.1)",
+                  borderRadius: "10px",
+                  color: "#f8fafc",
+                  fontSize: "13.5px",
+                  outline: "none",
+                  boxShadow: "0 8px 32px 0 rgba(0, 0, 0, 0.37)",
+                  transition: "border-color 0.15s, box-shadow 0.15s",
+                }}
+                onFocus={(e) => {
+                  e.currentTarget.style.borderColor = "rgba(255, 255, 255, 0.35)";
+                  e.currentTarget.style.boxShadow = "0 0 0 1px rgba(255, 255, 255, 0.15)";
+                }}
+                onBlur={(e) => {
+                  e.currentTarget.style.borderColor = "rgba(255, 255, 255, 0.1)";
+                  e.currentTarget.style.boxShadow = "none";
+                }}
+              />
+              <span
+                style={{
+                  position: "absolute",
+                  left: "14px",
+                  top: "50%",
+                  transform: "translateY(-50%)",
+                  pointerEvents: "none",
+                  display: "flex",
+                  alignItems: "center",
+                }}
+              >
+                <MagnifierIcon size={16} color="#64748b" />
+              </span>
+            </BorderGlow>
 
+            <ShimmerButton
+              type="submit"
+              variant="primary"
+              disabled={loading || !inputVal.trim()}
+              style={{
+                height: "42px",
+                padding: "0 18px",
+                borderRadius: "10px",
+              }}
+            >
+              <RocketIcon isLaunching={loading} size={15} />
+              <span>{loading ? "Tracking..." : "Track"}</span>
+            </ShimmerButton>
+          </form>
+
+          {/* ⏱️ Recent Students Quick-Switch Pills */}
+          <RecentUsersPills
+            currentUsername={username}
+            onSelectUser={handleSelectRecent}
+          />
+        </div>
+
+        {/* Error */}
+        {error && (
+          <div
+            style={{
+              padding: "10px 14px",
+              backgroundColor: "rgba(239, 68, 68, 0.08)",
+              border: "1px solid rgba(239, 68, 68, 0.25)",
+              borderRadius: "8px",
+              marginBottom: "12px",
+              color: "#f87171",
+              fontSize: "12.5px",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              flexShrink: 0,
+            }}
+          >
+            <div>
+              <b>Error:</b> {error}
+            </div>
             {isAuthError && (
               <button
                 onClick={() => setSettingsOpen(true)}
                 style={{
-                  background:   "none",
-                  border:       "1px solid var(--amber)",
-                  borderRadius: "4px",
-                  color:        "var(--amber)",
-                  fontFamily:   "var(--font-mono)",
-                  fontSize:     "12px",
-                  padding:      "6px 14px",
-                  cursor:       "pointer",
-                  transition:   "background 0.15s",
+                  backgroundColor: "rgba(239, 68, 68, 0.15)",
+                  color: "#f87171",
+                  border: "1px solid rgba(239, 68, 68, 0.3)",
+                  borderRadius: "5px",
+                  padding: "3px 8px",
+                  fontSize: "11px",
+                  fontWeight: 600,
+                  cursor: "pointer",
                 }}
-                onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(227,179,65,0.15)"; }}
-                onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "none"; }}
               >
-                ⚙ Refresh Session Cookies →
+                Re-Authenticate
               </button>
             )}
           </div>
         )}
 
-        {/* ── Results ──────────────────────────────────────────────────────── */}
-        {data && !loading && (
-          <ResultsView data={data} />
+        {/* Loading Spinner */}
+        {loading && (
+          <div
+            style={{
+              padding: "40px 20px",
+              textAlign: "center",
+              color: "#94a3b8",
+              fontSize: "13.5px",
+              flex: 1,
+            }}
+          >
+            <div
+              style={{
+                width: "32px",
+                height: "32px",
+                border: "2px solid rgba(255, 255, 255, 0.1)",
+                borderTopColor: "#ffffff",
+                borderRadius: "50%",
+                margin: "0 auto 12px auto",
+                animation: "spin 0.7s linear infinite",
+              }}
+            />
+            Querying LeetCode GraphQL & Aligning Matrix...
+            <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+          </div>
+        )}
+
+        {/* Populated Results View (Takes remaining viewport height with internal scroll) */}
+        {hasResults && (
+          <div style={{ flex: 1, minHeight: 0, overflow: "hidden", animation: "fadeIn 0.3s ease" }}>
+            <ResultsView
+              data={data!}
+              onRefresh={() => runTrack(username, creds)}
+              loading={loading}
+            />
+          </div>
         )}
       </main>
 
-      {/* ── Footer ──────────────────────────────────────────────────────────── */}
-      <footer style={{
-        borderTop:      "1px solid var(--border)",
-        padding:        "16px 24px",
-        marginTop:      "auto",
-        display:        "flex",
-        alignItems:     "center",
-        justifyContent: "space-between",
-        flexWrap:       "wrap",
-        gap:            "12px",
-        fontSize:       "12px",
-        fontFamily:     "var(--font-mono)",
-        color:          "var(--text-muted)",
-      }}>
-        <span>
-          tracker.sh <span style={{ color: "var(--border)" }}>·</span> open source
-        </span>
-        <span>
-          built by{" "}
-          <a
-            href="https://github.com/aman690888"
-            target="_blank"
-            rel="noopener noreferrer"
-            style={{
-              color:          "var(--text-secondary)",
-              textDecoration: "none",
-              transition:     "color 0.15s",
-            }}
-            onMouseEnter={(e) => { (e.currentTarget as HTMLAnchorElement).style.color = "var(--blue)"; }}
-            onMouseLeave={(e) => { (e.currentTarget as HTMLAnchorElement).style.color = "var(--text-secondary)"; }}
-          >
-            Aman Rawat ↗
-          </a>
-        </span>
-      </footer>
-
-      {/* ── Settings panel ──────────────────────────────────────────────────── */}
-      <SettingsPanel
+      <AnimatedSettingsModal
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
         onCredsChange={handleCredsChange}
       />
+
+      <style>{`
+        @keyframes fadeIn {
+          from { opacity: 0; transform: translateY(6px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+      `}</style>
     </div>
   );
 }
 
-// Blinking cursor
-function Blink() {
+export default function TrackerPage() {
   return (
-    <span style={{
-      display:       "inline-block",
-      width:         "8px",
-      height:        "13px",
-      background:    "var(--green)",
-      verticalAlign: "middle",
-      animation:     "blink 1s step-end infinite",
-    }} />
-  );
-}
-
-// Wrap in Suspense — required for useSearchParams
-export default function Page() {
-  return (
-    <Suspense>
-      <TrackerInner />
-      <style>{`@keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }`}</style>
+    <Suspense fallback={<div style={{ padding: 24, color: "#94a3b8" }}>Loading Tracker...</div>}>
+      <MainTrackerInner />
     </Suspense>
   );
 }
