@@ -97,6 +97,55 @@ function formatErrorDetails(err: unknown): Record<string, unknown> {
 }
 
 /**
+ * Resilient fetch wrapper for serverless environments.
+ * - Adds Connection: close to avoid dead keep-alive socket reuse (which causes ECONNRESET in AWS Lambda / Vercel).
+ * - Implements automatic exponential backoff retries on transient network disconnects.
+ */
+async function fetchWithRetry(
+  url: string,
+  options: RequestInit = {},
+  maxRetries = 3
+): Promise<Response> {
+  const headers = new Headers(options.headers || {});
+  if (!headers.has("Connection")) {
+    headers.set("Connection", "close");
+  }
+
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const res = await fetch(url, {
+        ...options,
+        headers,
+        signal: AbortSignal.timeout(12000), // 12s timeout
+      });
+      return res;
+    } catch (err: unknown) {
+      lastError = err;
+      const isRetryable =
+        attempt < maxRetries &&
+        (String(err).includes("ECONNRESET") ||
+          String(err).includes("fetch failed") ||
+          String(err).includes("ETIMEDOUT") ||
+          String(err).includes("EAI_AGAIN") ||
+          String(err).includes("UND_ERR_SOCKET"));
+
+      if (isRetryable) {
+        const delayMs = attempt * 350 + Math.floor(Math.random() * 200);
+        console.warn(
+          `[usage-logger] Fetch attempt ${attempt}/${maxRetries} to ${url} failed with network error, retrying in ${delayMs}ms...`
+        );
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      } else {
+        break;
+      }
+    }
+  }
+
+  throw lastError;
+}
+
+/**
  * Resolves service account credentials from env vars or local service-account.json file.
  */
 function getCredentials(): ServiceAccountCredentials | null {
@@ -186,22 +235,6 @@ async function getAccessToken(): Promise<string> {
     );
   }
 
-  // ── Standalone Key Diagnostic Check ────────────────────────────────────────
-  const startsWithHeader = creds.private_key.startsWith("-----BEGIN PRIVATE KEY-----");
-  const endsWithFooter = creds.private_key.endsWith("-----END PRIVATE KEY-----\n");
-  const lineCount = creds.private_key.split("\n").length;
-
-  console.log(
-    `[usage-logger] Private Key Diagnostics:\n` +
-    `  - Email: ${creds.client_email}\n` +
-    `  - Raw length: ${creds.raw_key_length ?? "unknown"}\n` +
-    `  - Cleaned length: ${creds.private_key.length}\n` +
-    `  - Starts with '-----BEGIN PRIVATE KEY-----': ${startsWithHeader}\n` +
-    `  - Ends with '-----END PRIVATE KEY-----\\n': ${endsWithFooter}\n` +
-    `  - Total lines: ${lineCount}\n` +
-    `  - Key preview: "${creds.private_key.slice(0, 30).replace(/\n/g, "↵")}...${creds.private_key.slice(-30).replace(/\n/g, "↵")}"`
-  );
-
   const header = { alg: "RS256", typ: "JWT" };
   const claimSet = {
     iss: creds.client_email,
@@ -236,9 +269,11 @@ async function getAccessToken(): Promise<string> {
 
   let tokenRes: Response;
   try {
-    tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+    tokenRes = await fetchWithRetry("https://oauth2.googleapis.com/token", {
       method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
       body: new URLSearchParams({
         grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
         assertion: jwt,
@@ -328,7 +363,7 @@ export async function logUsageEvent(params: {
 
   let res: Response;
   try {
-    res = await fetch(appendUrl, {
+    res = await fetchWithRetry(appendUrl, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${accessToken}`,
@@ -347,6 +382,10 @@ export async function logUsageEvent(params: {
   }
 
   if (!res.ok) {
+    // If token was rejected (401/403), invalidate cache for next request
+    if (res.status === 401 || res.status === 403) {
+      tokenCache = null;
+    }
     const errText = await res.text().catch(() => "(could not read body)");
     console.error(
       `[usage-logger] Sheets API returned HTTP ${res.status}.`,
@@ -368,19 +407,31 @@ export async function getUsageLogs(): Promise<UsageLogRow[]> {
     throw new Error("USAGE_LOG_SHEET_ID environment variable is not configured.");
   }
 
-  const accessToken = await getAccessToken();
-
+  let accessToken = await getAccessToken();
   const getUrl = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/UsageLogs!A2:F`;
 
   let res: Response;
   try {
-    res = await fetch(getUrl, {
+    res = await fetchWithRetry(getUrl, {
       headers: {
         Authorization: `Bearer ${accessToken}`,
         Accept: "application/json",
       },
       cache: "no-store",
     });
+
+    // Invalidate stale cached token on 401 and retry once
+    if (res.status === 401) {
+      tokenCache = null;
+      accessToken = await getAccessToken();
+      res = await fetchWithRetry(getUrl, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: "application/json",
+        },
+        cache: "no-store",
+      });
+    }
   } catch (networkErr: unknown) {
     console.error(
       `[usage-logger] Network error calling Sheets API (getUsageLogs):`,
