@@ -61,6 +61,7 @@ function findColIdx(headers: string[], ...keywords: string[]): number {
 function extractProblems(cell: string): Omit<Problem, "solved">[] {
   const lines = cell.split(/\r?\n/).map((l) => l.replace(/,\s*$/, "").trim());
   const results: Omit<Problem, "solved">[] = [];
+  const seenSlugs = new Set<string>();
   let pendingTitle: string | null = null;
   let pendingId:    string | null = null;
 
@@ -73,17 +74,20 @@ function extractProblems(cell: string): Omit<Problem, "solved">[] {
 
     const urlMatch = URL_RE.exec(line);
     if (urlMatch) {
-      const slug     = urlMatch[1];
-      const fallback = slug
-        .split("-")
-        .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-        .join(" ");
-      results.push({
-        slug,
-        id:    pendingId,
-        title: pendingTitle ?? fallback,
-        url:   `https://leetcode.com/problems/${slug}/description/`,
-      });
+      const slug = urlMatch[1];
+      if (!seenSlugs.has(slug)) {
+        seenSlugs.add(slug);
+        const fallback = slug
+          .split("-")
+          .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+          .join(" ");
+        results.push({
+          slug,
+          id:    pendingId,
+          title: pendingTitle ?? fallback,
+          url:   `https://leetcode.com/problems/${slug}/description/`,
+        });
+      }
       pendingTitle = null;
       pendingId    = null;
       continue;

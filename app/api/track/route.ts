@@ -31,19 +31,54 @@ function normalizeSlug(raw: string): string {
 }
 
 /**
- * Simple character-overlap similarity score between two strings (0–1).
- * Not Levenshtein — fast enough for a debug check over small sets.
+ * Computes Levenshtein edit distance between two strings.
  */
-function similarity(a: string, b: string): number {
+function levenshtein(a: string, b: string): number {
+  const m = a.length;
+  const n = b.length;
+  const dp: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      if (a[i - 1] === b[j - 1]) {
+        dp[i][j] = dp[i - 1][j - 1];
+      } else {
+        dp[i][j] = 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+      }
+    }
+  }
+  return dp[m][n];
+}
+
+/**
+ * Calculates slug similarity using word-token Jaccard overlap and normalized Levenshtein distance.
+ * Prevents false positives from simple character-frequency collisions.
+ */
+function slugSimilarity(a: string, b: string): number {
   if (a === b) return 1;
   if (!a || !b) return 0;
-  const longer  = a.length >= b.length ? a : b;
-  const shorter = a.length < b.length  ? a : b;
-  let matches = 0;
-  for (let i = 0; i < shorter.length; i++) {
-    if (longer.includes(shorter[i])) matches++;
+
+  const tokensA = new Set(a.split("-").filter(Boolean));
+  const tokensB = new Set(b.split("-").filter(Boolean));
+
+  let sharedTokens = 0;
+  for (const t of tokensA) {
+    if (tokensB.has(t)) sharedTokens++;
   }
-  return matches / longer.length;
+  const totalUniqueTokens = new Set([...tokensA, ...tokensB]).size;
+  const jaccard = totalUniqueTokens > 0 ? sharedTokens / totalUniqueTokens : 0;
+
+  const maxLen = Math.max(a.length, b.length);
+  const levDist = levenshtein(a, b);
+  const levSim = maxLen > 0 ? 1 - levDist / maxLen : 0;
+
+  // Only consider as a meaningful candidate if it shares significant word tokens (>= 50%) or high edit similarity (>= 80%)
+  if (jaccard >= 0.5 || levSim >= 0.8) {
+    return Math.max(jaccard, levSim);
+  }
+  return 0;
 }
 
 // ── Route handler ─────────────────────────────────────────────────────────────
@@ -71,11 +106,12 @@ export async function GET(
   try {
     await verifyUser(username);
   } catch (err: unknown) {
-    const e = err as Error & { code?: string };
-    if (e.code === "USER_NOT_FOUND") {
+    const e = err as Error & { code?: string; status?: number };
+    if (e.code === "USER_NOT_FOUND" || e.status === 404 || e.message?.includes("404")) {
+      console.warn(`[DEBUG-LC] Username not found on LeetCode: ${username}`);
       return NextResponse.json(
         {
-          error: `No LeetCode account found for "${username}". Double-check the username.`,
+          error: "LeetCode username not found — please check the spelling",
           code: "USER_NOT_FOUND",
         } satisfies TrackError,
         { status: 404 }
@@ -104,7 +140,17 @@ export async function GET(
   try {
     solvedSlugs = await fetchSolvedSlugs(username, clientCreds);
   } catch (err: unknown) {
-    const e = err as Error & { code?: string };
+    const e = err as Error & { code?: string; status?: number };
+    if (e.code === "USER_NOT_FOUND" || e.status === 404 || e.message?.includes("404")) {
+      console.warn(`[DEBUG-LC] Username not found on LeetCode: ${username}`);
+      return NextResponse.json(
+        {
+          error: "LeetCode username not found — please check the spelling",
+          code: "USER_NOT_FOUND",
+        } satisfies TrackError,
+        { status: 404 }
+      );
+    }
     if (e.code === "AUTH_REQUIRED") {
       return NextResponse.json(
         {
@@ -170,18 +216,21 @@ export async function GET(
 
       // --- TEMPORARY DEBUG LOG: per-problem match trace ---
       if (!p.solved) {
-        // Closest-match among solved slugs for near-miss detection
+        // Closest-match among solved slugs for near-miss detection (word overlap & edit distance)
         let bestScore = 0;
         let bestMatch = "";
         for (const s of solvedNormedSet) {
-          const score = similarity(normSlug, s);
+          const score = slugSimilarity(normSlug, s);
           if (score > bestScore) { bestScore = score; bestMatch = s; }
         }
 
+        const matchInfo = bestScore > 0
+          ? `closestMatch="${bestMatch}" (similarity=${bestScore.toFixed(2)})`
+          : `no close match found`;
+
         console.log(
           `[DEBUG-MISS] "${rawSlug}" (norm: "${normSlug}") — ` +
-          `exactHit=${exactHit}, normHit=${normHit}, ` +
-          `closestMatch=${bestScore >= 0.9 ? `"${bestMatch}" (score=${bestScore.toFixed(2)})` : `none above 90% (best: "${bestMatch}" @ ${bestScore.toFixed(2)})`}`
+          `exactHit=${exactHit}, normHit=${normHit}, ${matchInfo}`
         );
       } else if (!exactHit && normHit) {
         // It only matched after normalization — this is the bug indicator

@@ -188,14 +188,33 @@ async function fetchAllSolvedAuth(creds: Creds): Promise<Set<string>> {
 
 // ── Public API ─────────────────────────────────────────────────────────────────
 
-/** Verifies the user exists. Throws { code: "USER_NOT_FOUND" } if not. */
+/** Verifies the user exists on LeetCode. Throws { code: "USER_NOT_FOUND", status: 404 } if not. */
 export async function verifyUser(username: string): Promise<void> {
-  const raw = (await gql(PROFILE_QUERY, { username })) as {
-    data?: { matchedUser?: { username: string } };
-  };
-  if (!raw?.data?.matchedUser) {
-    const err = new Error(`No LeetCode account found for "${username}". Double-check the username.`);
-    (err as Error & { code: string }).code = "USER_NOT_FOUND";
+  try {
+    const raw = (await gql(PROFILE_QUERY, { username })) as {
+      data?: { matchedUser?: { username: string } | null } | null;
+      errors?: Array<{ message?: string }>;
+    };
+    if (!raw?.data?.matchedUser || !raw.data.matchedUser.username) {
+      console.warn(`[DEBUG-LC] Username not found on LeetCode: ${username}`);
+      const err = new Error("LeetCode username not found — please check the spelling");
+      (err as Error & { code: string; status: number }).code = "USER_NOT_FOUND";
+      (err as Error & { code: string; status: number }).status = 404;
+      throw err;
+    }
+  } catch (err: unknown) {
+    const e = err as Error & { code?: string; status?: number };
+    if (e.code === "USER_NOT_FOUND") {
+      throw e;
+    }
+    // LeetCode GraphQL API returns HTTP 404 for unknown usernames
+    if (e.status === 404 || e.message?.includes("404")) {
+      console.warn(`[DEBUG-LC] Username not found on LeetCode: ${username}`);
+      const notFoundErr = new Error("LeetCode username not found — please check the spelling");
+      (notFoundErr as Error & { code: string; status: number }).code = "USER_NOT_FOUND";
+      (notFoundErr as Error & { code: string; status: number }).status = 404;
+      throw notFoundErr;
+    }
     throw err;
   }
 }

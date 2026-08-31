@@ -62,49 +62,17 @@ function formatPrivateKey(rawKey: string): string {
   return key;
 }
 
-/**
- * Formats an error and its nested cause for detailed JSON logging.
- */
-function formatErrorDetails(err: unknown): Record<string, unknown> {
-  if (!err) return { error: String(err) };
-  if (err instanceof Error) {
-    const causeObj = (err as Error & { cause?: unknown }).cause;
-    let formattedCause: unknown = undefined;
-    if (causeObj instanceof Error) {
-      formattedCause = {
-        name: causeObj.name,
-        message: causeObj.message,
-        code: (causeObj as { code?: string }).code,
-        syscall: (causeObj as { syscall?: string }).syscall,
-        hostname: (causeObj as { hostname?: string }).hostname,
-        stack: causeObj.stack,
-      };
-    } else if (causeObj && typeof causeObj === "object") {
-      formattedCause = causeObj;
-    } else if (causeObj !== undefined) {
-      formattedCause = String(causeObj);
-    }
-
-    return {
-      name: err.name,
-      message: err.message,
-      code: (err as { code?: string }).code,
-      cause: formattedCause,
-      stack: err.stack,
-    };
-  }
-  return { error: String(err) };
-}
 
 /**
  * Resilient fetch wrapper for serverless environments.
- * - Adds Connection: close to avoid dead keep-alive socket reuse (which causes ECONNRESET in AWS Lambda / Vercel).
- * - Implements automatic exponential backoff retries on transient network disconnects.
+ * - Adds Connection: close to avoid dead keep-alive socket reuse.
+ * - Implements 10s timeout with exponential backoff retries on transient network disconnects or timeouts.
  */
 async function fetchWithRetry(
   url: string,
   options: RequestInit = {},
-  maxRetries = 3
+  maxRetries = 2,
+  timeoutMs = 10000
 ): Promise<Response> {
   const headers = new Headers(options.headers || {});
   if (!headers.has("Connection")) {
@@ -117,27 +85,14 @@ async function fetchWithRetry(
       const res = await fetch(url, {
         ...options,
         headers,
-        signal: AbortSignal.timeout(12000), // 12s timeout
+        signal: AbortSignal.timeout(timeoutMs),
       });
       return res;
     } catch (err: unknown) {
       lastError = err;
-      const isRetryable =
-        attempt < maxRetries &&
-        (String(err).includes("ECONNRESET") ||
-          String(err).includes("fetch failed") ||
-          String(err).includes("ETIMEDOUT") ||
-          String(err).includes("EAI_AGAIN") ||
-          String(err).includes("UND_ERR_SOCKET"));
-
-      if (isRetryable) {
-        const delayMs = attempt * 350 + Math.floor(Math.random() * 200);
-        console.warn(
-          `[usage-logger] Fetch attempt ${attempt}/${maxRetries} to ${url} failed with network error, retrying in ${delayMs}ms...`
-        );
+      if (attempt < maxRetries) {
+        const delayMs = attempt * 400 + Math.floor(Math.random() * 200);
         await new Promise((resolve) => setTimeout(resolve, delayMs));
-      } else {
-        break;
       }
     }
   }
@@ -260,31 +215,31 @@ async function getAccessToken(): Promise<string> {
 
     jwt = `${signInput}.${encodedSignature}`;
   } catch (signErr: unknown) {
-    console.error(
-      "[usage-logger] crypto.sign failed when signing JWT:",
-      formatErrorDetails(signErr)
-    );
+    const msg = signErr instanceof Error ? signErr.message : String(signErr);
+    console.warn(`[usage-logger] crypto.sign failed when signing JWT: ${msg}`);
     throw signErr;
   }
 
   let tokenRes: Response;
   try {
-    tokenRes = await fetchWithRetry("https://oauth2.googleapis.com/token", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
+    tokenRes = await fetchWithRetry(
+      "https://oauth2.googleapis.com/token",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({
+          grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+          assertion: jwt,
+        }),
       },
-      body: new URLSearchParams({
-        grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
-        assertion: jwt,
-      }),
-    });
-  } catch (fetchErr: unknown) {
-    console.error(
-      "[usage-logger] Network error during token exchange fetch:",
-      formatErrorDetails(fetchErr)
+      2,
+      10000
     );
-    throw fetchErr;
+  } catch (fetchErr: unknown) {
+    const msg = fetchErr instanceof Error ? fetchErr.message : String(fetchErr);
+    throw new Error(`Token exchange failed: ${msg}`);
   }
 
   const tokenJson = (await tokenRes.json().catch(() => ({}))) as {
@@ -296,8 +251,7 @@ async function getAccessToken(): Promise<string> {
 
   if (!tokenRes.ok || !tokenJson.access_token) {
     const errMsg = tokenJson.error_description || tokenJson.error || tokenRes.statusText;
-    console.error(`[usage-logger] Google OAuth2 API error (HTTP ${tokenRes.status}):`, tokenJson);
-    throw new Error(`Failed to obtain Google access token: ${errMsg}`);
+    throw new Error(`Failed to obtain Google access token (${tokenRes.status}): ${errMsg}`);
   }
 
   tokenCache = {
@@ -322,7 +276,7 @@ export function getISTIsoTimestamp(): string {
 /**
  * Appends a usage log row to the "UsageLogs" tab in USAGE_LOG_SHEET_ID.
  * Intended to be called fire-and-forget (.catch() in caller).
- * Full error chain is logged here so "fetch failed" never hides the real cause.
+ * Failures never throw or block the main request — logs a clean single-line warning.
  */
 export async function logUsageEvent(params: {
   username: string;
@@ -333,7 +287,6 @@ export async function logUsageEvent(params: {
 }): Promise<void> {
   const sheetId = process.env.USAGE_LOG_SHEET_ID?.trim();
   if (!sheetId) {
-    console.warn("[usage-logger] USAGE_LOG_SHEET_ID not set — skipping log.");
     return;
   }
 
@@ -342,11 +295,9 @@ export async function logUsageEvent(params: {
   try {
     accessToken = await getAccessToken();
   } catch (tokenErr: unknown) {
-    console.error(
-      "[usage-logger] FAILED to get OAuth2 access token:",
-      formatErrorDetails(tokenErr)
-    );
-    return; // don't throw — fire-and-forget
+    const msg = tokenErr instanceof Error ? tokenErr.message : String(tokenErr);
+    console.warn(`[usage-logger] Skipping analytics log: OAuth2 token request failed (${msg})`);
+    return; // fire-and-forget: never block or throw
   }
 
   // ── Sheets API write ───────────────────────────────────────────────────────
@@ -363,21 +314,24 @@ export async function logUsageEvent(params: {
 
   let res: Response;
   try {
-    res = await fetchWithRetry(appendUrl, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json",
+    res = await fetchWithRetry(
+      appendUrl,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          values: [[timestamp, username, action, result, ip, userAgent]],
+        }),
       },
-      body: JSON.stringify({
-        values: [[timestamp, username, action, result, ip, userAgent]],
-      }),
-    });
-  } catch (networkErr: unknown) {
-    console.error(
-      `[usage-logger] Network error calling Sheets API:`,
-      formatErrorDetails(networkErr)
+      2,
+      10000
     );
+  } catch (networkErr: unknown) {
+    const msg = networkErr instanceof Error ? networkErr.message : String(networkErr);
+    console.warn(`[usage-logger] Skipping analytics log: Sheets API call failed (${msg})`);
     return;
   }
 
@@ -386,12 +340,7 @@ export async function logUsageEvent(params: {
     if (res.status === 401 || res.status === 403) {
       tokenCache = null;
     }
-    const errText = await res.text().catch(() => "(could not read body)");
-    console.error(
-      `[usage-logger] Sheets API returned HTTP ${res.status}.`,
-      `\n  Body: ${errText}`,
-      `\n  sheetId=${sheetId}`
-    );
+    console.warn(`[usage-logger] Skipping analytics log: Sheets API returned HTTP ${res.status}`);
     return;
   }
 
@@ -412,31 +361,39 @@ export async function getUsageLogs(): Promise<UsageLogRow[]> {
 
   let res: Response;
   try {
-    res = await fetchWithRetry(getUrl, {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        Accept: "application/json",
-      },
-      cache: "no-store",
-    });
-
-    // Invalidate stale cached token on 401 and retry once
-    if (res.status === 401) {
-      tokenCache = null;
-      accessToken = await getAccessToken();
-      res = await fetchWithRetry(getUrl, {
+    res = await fetchWithRetry(
+      getUrl,
+      {
         headers: {
           Authorization: `Bearer ${accessToken}`,
           Accept: "application/json",
         },
         cache: "no-store",
-      });
+      },
+      2,
+      10000
+    );
+
+    // Invalidate stale cached token on 401 and retry once
+    if (res.status === 401) {
+      tokenCache = null;
+      accessToken = await getAccessToken();
+      res = await fetchWithRetry(
+        getUrl,
+        {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            Accept: "application/json",
+          },
+          cache: "no-store",
+        },
+        2,
+        10000
+      );
     }
   } catch (networkErr: unknown) {
-    console.error(
-      `[usage-logger] Network error calling Sheets API (getUsageLogs):`,
-      formatErrorDetails(networkErr)
-    );
+    const msg = networkErr instanceof Error ? networkErr.message : String(networkErr);
+    console.warn(`[usage-logger] Network error calling Sheets API (getUsageLogs): ${msg}`);
     throw networkErr;
   }
 
