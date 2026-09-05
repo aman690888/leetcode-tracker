@@ -29,6 +29,12 @@ async function gql(
     body:  JSON.stringify({ query, variables }),
     cache: "no-store",
   });
+  if (res.status === 401 || res.status === 403) {
+    const err = new Error("Session expired or invalid — please refresh your cookies in settings.");
+    (err as Error & { code: string; status: number }).code = "AUTH_EXPIRED";
+    (err as Error & { code: string; status: number }).status = res.status;
+    throw err;
+  }
   if (!res.ok) {
     const err = new Error(`LeetCode API returned HTTP ${res.status}`);
     (err as Error & { status: number }).status = res.status;
@@ -38,6 +44,15 @@ async function gql(
 }
 
 // ── Queries ───────────────────────────────────────────────────────────────────
+const USER_STATUS_QUERY = `
+  query globalData {
+    userStatus {
+      isSignedIn
+      username
+    }
+  }
+`;
+
 const PROFILE_QUERY = `
   query userPublicProfile($username: String!) {
     matchedUser(username: $username) {
@@ -100,6 +115,33 @@ function authHeaders(creds: Creds): Record<string, string> {
 
 // ── Authenticated full-history fetch ───────────────────────────────────────────
 async function fetchAllSolvedAuth(creds: Creds): Promise<Set<string>> {
+  // 1. Directly validate that the session cookies are authentic and signed in
+  const statusRaw = (await gql(
+    USER_STATUS_QUERY,
+    {},
+    authHeaders(creds)
+  )) as {
+    data?: { userStatus?: { isSignedIn?: boolean; username?: string } | null } | null;
+    errors?: Array<{ message?: string }>;
+  };
+
+  if (
+    (statusRaw?.errors && statusRaw.errors.length > 0) ||
+    !statusRaw?.data?.userStatus?.isSignedIn
+  ) {
+    console.error(
+      `[DEBUG-LC] Auth check failed — isSignedIn: ${statusRaw?.data?.userStatus?.isSignedIn}, errors:`,
+      statusRaw?.errors
+    );
+    const err = new Error("Session expired or invalid — please refresh your cookies in settings.");
+    (err as Error & { code: string }).code = "AUTH_EXPIRED";
+    throw err;
+  }
+
+  console.log(
+    `[DEBUG-LC] Session verified successfully for LeetCode user: ${statusRaw.data.userStatus.username || "authenticated"}`
+  );
+
   const slugs = new Set<string>();
   const limit = 100; // LeetCode silently caps at 100 per page regardless of limit param
   let   skip  = 0;
@@ -118,10 +160,21 @@ async function fetchAllSolvedAuth(creds: Creds): Promise<Set<string>> {
       AC_PROBLEMS_AUTH_QUERY,
       { categorySlug: "", limit, skip, filters: { status: "AC" } },
       authHeaders(creds)
-    )) as { data?: { problemsetQuestionList?: AcPage } };
+    )) as {
+      data?: { problemsetQuestionList?: AcPage | null } | null;
+      errors?: Array<{ message?: string }>;
+    };
+
+    if (raw?.errors && raw.errors.length > 0) {
+      console.error(`[DEBUG-LC] GraphQL errors on page ${page}:`, raw.errors);
+      const err = new Error("Session expired or invalid — please refresh your cookies in settings.");
+      (err as Error & { code: string }).code = "AUTH_EXPIRED";
+      throw err;
+    }
 
     const pageData = raw?.data?.problemsetQuestionList;
-    if (!pageData) {
+    if (!pageData || typeof pageData.total !== "number" || !Array.isArray(pageData.questions)) {
+      console.error(`[DEBUG-LC] Missing or invalid pageData structure on page ${page}:`, pageData);
       const err = new Error("Session expired or invalid — please refresh your cookies in settings.");
       (err as Error & { code: string }).code = "AUTH_EXPIRED";
       throw err;
@@ -163,10 +216,10 @@ async function fetchAllSolvedAuth(creds: Creds): Promise<Set<string>> {
       }
 
       // Two legitimate break cases:
-      //   (a) page === 1 && total === 0 → genuine new/empty account
+      //   (a) page === 1 && total === 0 → verified authenticated account with 0 solves
       //   (b) page > 1 → mid-pagination stall (rare, avoids infinite loop)
-      if (page === 1) {
-        console.log(`[DEBUG-LC] Account has 0 solved problems (new account or no AC submissions).`);
+      if (page === 1 && total === 0) {
+        console.log(`[DEBUG-LC] Verified signed-in account has 0 solved problems (genuine new account or no AC submissions).`);
       } else {
         console.warn(
           `[DEBUG-LC] ⚠ Page ${page} returned 0 new slugs (mid-pagination stall) — ` +

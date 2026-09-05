@@ -22,6 +22,9 @@ function MainTrackerInner() {
   const [inputVal, setInputVal] = useState(initialUser);
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState<TrackResponse | null>(null);
+  type SessionStatus = "none" | "saved" | "verified" | "expired";
+
+  const [sessionStatus, setSessionStatus] = useState<SessionStatus>("none");
   const [error, setError] = useState<string | null>(null);
   const [isAuthError, setIsAuthError] = useState(false);
   const [isUserNotFoundError, setIsUserNotFoundError] = useState(false);
@@ -31,6 +34,11 @@ function MainTrackerInner() {
   useEffect(() => {
     const saved = loadCreds();
     setCreds(saved);
+    if (saved?.session && saved?.csrf) {
+      setSessionStatus("saved");
+    } else {
+      setSessionStatus("none");
+    }
   }, []);
 
   const runTrack = useCallback(
@@ -39,6 +47,7 @@ function MainTrackerInner() {
       if (!trimmed) return;
 
       if (!currentCreds?.session || !currentCreds?.csrf) {
+        setSessionStatus("none");
         setSettingsOpen(true);
         return;
       }
@@ -73,14 +82,21 @@ function MainTrackerInner() {
           } else {
             const errJson = json as TrackError | null;
             setError(errJson?.error ?? "Failed to fetch student progress.");
-            if (errJson?.code === "AUTH_EXPIRED" || errJson?.code === "AUTH_REQUIRED") {
+            if (
+              errJson?.code === "AUTH_EXPIRED" ||
+              errJson?.code === "AUTH_REQUIRED" ||
+              res.status === 401 ||
+              res.status === 403
+            ) {
               setIsAuthError(true);
+              setSessionStatus("expired");
             }
           }
         } else if (json) {
           setData(json as TrackResponse);
           setUsername(trimmed);
           setInputVal(trimmed);
+          setSessionStatus("verified");
         }
       } catch {
         setError("Network error — could not reach the server.");
@@ -96,7 +112,10 @@ function MainTrackerInner() {
       const saved = loadCreds();
       setCreds(saved);
       if (saved?.session && saved?.csrf) {
+        setSessionStatus("saved");
         runTrack(initialUser, saved);
+      } else {
+        setSessionStatus("none");
       }
     }
   }, []);
@@ -113,8 +132,13 @@ function MainTrackerInner() {
 
   function handleCredsChange(newCreds: StoredCreds | null) {
     setCreds(newCreds);
-    if (newCreds?.session && newCreds?.csrf && inputVal.trim()) {
-      runTrack(inputVal, newCreds);
+    if (newCreds?.session && newCreds?.csrf) {
+      setSessionStatus("saved");
+      if (inputVal.trim()) {
+        runTrack(inputVal, newCreds);
+      }
+    } else {
+      setSessionStatus("none");
     }
   }
 
@@ -180,26 +204,61 @@ function MainTrackerInner() {
           </div>
         </div>
 
-        <button
-          onClick={() => setSettingsOpen(true)}
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: "6px",
-            padding: "5px 12px",
-            backgroundColor: hasCreds ? "rgba(16, 185, 129, 0.1)" : "rgba(245, 158, 11, 0.1)",
-            border: hasCreds ? "1px solid rgba(16, 185, 129, 0.25)" : "1px solid rgba(245, 158, 11, 0.25)",
-            borderRadius: "6px",
-            color: hasCreds ? "#10b981" : "#f59e0b",
-            fontSize: "11.5px",
-            fontWeight: 600,
-            cursor: "pointer",
-            transition: "all 0.15s ease",
-          }}
-        >
-          <span style={{ fontSize: "10px" }}>{hasCreds ? "●" : "○"}</span>
-          {hasCreds ? "Session Connected" : "Connect Session"}
-        </button>
+        {(() => {
+          const statusConfig = {
+            none: {
+              dot: "○",
+              label: "Connect Session",
+              bg: "rgba(245, 158, 11, 0.1)",
+              border: "1px solid rgba(245, 158, 11, 0.25)",
+              color: "#f59e0b",
+            },
+            saved: {
+              dot: "◐",
+              label: "Cookies Saved",
+              bg: "rgba(56, 189, 248, 0.1)",
+              border: "1px solid rgba(56, 189, 248, 0.25)",
+              color: "#38bdf8",
+            },
+            verified: {
+              dot: "●",
+              label: "Session Verified",
+              bg: "rgba(16, 185, 129, 0.1)",
+              border: "1px solid rgba(16, 185, 129, 0.25)",
+              color: "#10b981",
+            },
+            expired: {
+              dot: "●",
+              label: "Session Expired",
+              bg: "rgba(239, 68, 68, 0.15)",
+              border: "1px solid rgba(239, 68, 68, 0.35)",
+              color: "#ef4444",
+            },
+          }[sessionStatus];
+
+          return (
+            <button
+              onClick={() => setSettingsOpen(true)}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "6px",
+                padding: "5px 12px",
+                backgroundColor: statusConfig.bg,
+                border: statusConfig.border,
+                borderRadius: "6px",
+                color: statusConfig.color,
+                fontSize: "11.5px",
+                fontWeight: 600,
+                cursor: "pointer",
+                transition: "all 0.15s ease",
+              }}
+            >
+              <span style={{ fontSize: "10px" }}>{statusConfig.dot}</span>
+              {statusConfig.label}
+            </button>
+          );
+        })()}
       </header>
 
       {/* ── Main Dynamic Stage (Locked to Viewport Height) ─────────────────── */}
