@@ -2,7 +2,7 @@
  * app/api/admin/logs/route.ts
  *
  * Protected API endpoint to retrieve usage logs for the /admin dashboard.
- * Requires ADMIN_SECRET validation via query param (?key=...) or header (x-admin-key).
+ * Requires ADMIN_SECRET validation via the x-admin-key request header.
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -12,9 +12,7 @@ export const runtime = "nodejs";
 
 export async function GET(req: NextRequest) {
   const adminSecret = process.env.ADMIN_SECRET?.trim();
-  const providedKey =
-    req.nextUrl.searchParams.get("key")?.trim() ||
-    req.headers.get("x-admin-key")?.trim();
+  const providedKey = req.headers.get("x-admin-key")?.trim();
 
   if (!adminSecret) {
     return NextResponse.json(

@@ -4,20 +4,15 @@
  * app/admin/page.tsx
  *
  * Protected admin dashboard for viewing persistent usage logs.
- * Requires ADMIN_SECRET (via ?key=... query param or on-screen prompt).
+ * Requires ADMIN_SECRET via the in-memory x-admin-key request header.
  * Not linked in public navigation.
  */
 
-import React, { useState, useEffect, useMemo, Suspense } from "react";
-import { useSearchParams, useRouter } from "next/navigation";
+import React, { useState, useMemo, Suspense } from "react";
 import { UsageLogRow } from "@/lib/usage-logger";
 
 function AdminDashboardInner() {
-  const searchParams = useSearchParams();
-  const router = useRouter();
-
-  const urlKey = searchParams.get("key") || "";
-  const [adminKey, setAdminKey] = useState(urlKey);
+  const [adminKey, setAdminKey] = useState("");
   const [inputKey, setInputKey] = useState("");
   const [logs, setLogs] = useState<UsageLogRow[]>([]);
   const [loading, setLoading] = useState(false);
@@ -31,8 +26,11 @@ function AdminDashboardInner() {
     setError(null);
 
     try {
-      const res = await fetch(`/api/admin/logs?key=${encodeURIComponent(keyToUse.trim())}`, {
-        headers: { Accept: "application/json" },
+      const res = await fetch("/api/admin/logs", {
+        headers: {
+          Accept: "application/json",
+          "x-admin-key": keyToUse.trim(),
+        },
         cache: "no-store",
       });
 
@@ -44,13 +42,6 @@ function AdminDashboardInner() {
         setLogs(data.logs || []);
         setIsAuthenticated(true);
         setAdminKey(keyToUse.trim());
-
-        // Update URL with key if not present
-        if (searchParams.get("key") !== keyToUse.trim()) {
-          const params = new URLSearchParams(searchParams.toString());
-          params.set("key", keyToUse.trim());
-          router.replace(`?${params.toString()}`, { scroll: false });
-        }
       }
     } catch {
       setError("Network error: Failed to fetch usage logs.");
@@ -59,13 +50,6 @@ function AdminDashboardInner() {
       setLoading(false);
     }
   };
-
-  useEffect(() => {
-    if (urlKey) {
-      fetchLogs(urlKey);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   const handleKeySubmit = (e: React.FormEvent) => {
     e.preventDefault();
